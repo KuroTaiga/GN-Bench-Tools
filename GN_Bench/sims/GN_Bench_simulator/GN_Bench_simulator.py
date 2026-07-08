@@ -730,6 +730,7 @@ class GNBenchSim(Simulator):
         self.actor_seq_dir: Optional[Path] = None
         self.actor_enabled: bool = False
         self.door_bboxes: List[Tuple[float, float, float, float]] = []
+        self.dynamic_collision_positions: List[np.ndarray] = []
 
         self._initialize_sensors()
 
@@ -999,7 +1000,9 @@ class GNBenchSim(Simulator):
             if action_id == 1:
                 local_fwd = np.array([1, 0, 0], dtype=np.float32)
                 world_fwd = prev_rot_obj.apply(local_fwd)
-                teleport_pos = self._get_door_teleport_position(prev_pos, world_fwd)
+                teleport_pos = self.resolve_door_teleport_position(
+                    prev_pos, world_fwd
+                )
                 if teleport_pos is not None:
                     new_pos = teleport_pos
                     door_teleported = True
@@ -1206,6 +1209,20 @@ class GNBenchSim(Simulator):
     def get_agent_state(self, agent_id: int = 0) -> AgentState:
         return self.agent_state
 
+    def set_dynamic_collision_positions(
+        self, positions: Optional[Sequence[Sequence[float]]]
+    ) -> None:
+        """Register moving actors that should block door teleport landings."""
+        if not positions:
+            self.dynamic_collision_positions = []
+            return
+        self.dynamic_collision_positions = [
+            np.asarray(position, dtype=np.float32) for position in positions
+        ]
+
+    def clear_dynamic_collision_positions(self) -> None:
+        self.dynamic_collision_positions = []
+
     def _door_teleport_config(self) -> Any:
         return getattr(self.config, "DOOR_TELEPORT", None)
 
@@ -1226,6 +1243,18 @@ class GNBenchSim(Simulator):
         if cfg is None:
             return 0.3
         return float(getattr(cfg, "LANDING_DISTANCE", 0.3))
+
+    def _door_teleport_search_radius(self) -> float:
+        cfg = self._door_teleport_config()
+        if cfg is None:
+            return 1.0
+        return float(getattr(cfg, "SEARCH_RADIUS", 1.0))
+
+    def _door_teleport_dynamic_clearance(self) -> float:
+        cfg = self._door_teleport_config()
+        if cfg is None:
+            return 0.3
+        return float(getattr(cfg, "DYNAMIC_CLEARANCE", 0.3))
 
     def _load_door_bboxes(
         self, scene_dir: Path
@@ -1352,6 +1381,144 @@ class GNBenchSim(Simulator):
         )
 
         return np.array([target_xy[0], target_xy[1], position[2]], dtype=np.float32)
+
+    def _position_clears_dynamic_blockers(
+        self,
+        position: np.ndarray,
+        dynamic_blockers: Optional[Sequence[Sequence[float]]] = None,
+        clearance: Optional[float] = None,
+    ) -> bool:
+        if not dynamic_blockers:
+            return True
+
+        min_clearance = (
+            self._door_teleport_dynamic_clearance()
+            if clearance is None
+            else float(clearance)
+        )
+        if min_clearance <= 0.0:
+            return True
+
+        pos_xy = np.asarray(position[:2], dtype=np.float32)
+        for blocker in dynamic_blockers:
+            blocker_xy = np.asarray(blocker[:2], dtype=np.float32)
+            if float(np.linalg.norm(pos_xy - blocker_xy)) < min_clearance:
+                return False
+        return True
+
+    def _is_collision_free_position(
+        self,
+        position: np.ndarray,
+        dynamic_blockers: Optional[Sequence[Sequence[float]]] = None,
+        dynamic_clearance: Optional[float] = None,
+    ) -> bool:
+        if self.passable_grid is not None:
+            px = self.transform_from_world_to_pixel(position)
+            if not self._is_passable_pixel(px):
+                return False
+        return self._position_clears_dynamic_blockers(
+            position, dynamic_blockers, dynamic_clearance
+        )
+
+    def find_nearest_collision_free_position(
+        self,
+        target_position: Sequence[float],
+        *,
+        search_radius: Optional[float] = None,
+        dynamic_blockers: Optional[Sequence[Sequence[float]]] = None,
+        dynamic_clearance: Optional[float] = None,
+    ) -> Optional[np.ndarray]:
+        target = np.asarray(target_position, dtype=np.float32)
+        if target.shape[0] < 3:
+            raise ValueError("target_position must contain at least x, y, z")
+
+        if self._is_collision_free_position(
+            target, dynamic_blockers, dynamic_clearance
+        ):
+            return target.copy()
+
+        target_px = self.transform_from_world_to_pixel(target)
+        if self.meta is None or self.map_width <= 0 or self.map_height <= 0:
+            return None
+
+        if search_radius is None:
+            search_radius = self._door_teleport_search_radius()
+        search_radius = max(float(search_radius), 0.0)
+
+        span_x = self.meta["upper"][0] - self.meta["lower"][0]
+        span_y = self.meta["upper"][1] - self.meta["lower"][1]
+        scale_x = span_x / max(self.map_width, 1)
+        scale_y = span_y / max(self.map_height, 1)
+        meters_per_pixel = max(float(abs(scale_x)), float(abs(scale_y)), EPS)
+        max_radius_px = max(1, int(math.ceil(search_radius / meters_per_pixel)))
+
+        best_pos = None
+        best_dist = float("inf")
+        x0, y0 = target_px
+        for radius in range(0, max_radius_px + 1):
+            left = max(x0 - radius, 0)
+            right = min(x0 + radius, self.map_width - 1)
+            top = max(y0 - radius, 0)
+            bottom = min(y0 + radius, self.map_height - 1)
+
+            candidates: List[Tuple[int, int]] = []
+            if radius == 0:
+                candidates.append((x0, y0))
+            else:
+                for x in range(left, right + 1):
+                    candidates.append((x, top))
+                    candidates.append((x, bottom))
+                for y in range(top + 1, bottom):
+                    candidates.append((left, y))
+                    candidates.append((right, y))
+
+            for px in candidates:
+                candidate_xy = self.transform_from_pixel_to_world(px)
+                candidate = np.array(
+                    [candidate_xy[0], candidate_xy[1], target[2]], dtype=np.float32
+                )
+                if not self._is_collision_free_position(
+                    candidate, dynamic_blockers, dynamic_clearance
+                ):
+                    continue
+                dist = float(np.linalg.norm(candidate[:2] - target[:2]))
+                if dist > search_radius + EPS:
+                    continue
+                if dist < best_dist:
+                    best_dist = dist
+                    best_pos = candidate
+
+        return best_pos
+
+    def resolve_door_teleport_position(
+        self,
+        position: Sequence[float],
+        forward: Sequence[float],
+        *,
+        dynamic_blockers: Optional[Sequence[Sequence[float]]] = None,
+        dynamic_clearance: Optional[float] = None,
+    ) -> Optional[np.ndarray]:
+        position_np = np.asarray(position, dtype=np.float32)
+        if position_np.shape[0] < 3:
+            raise ValueError("position must contain at least x, y, z")
+
+        forward_np = np.asarray(forward, dtype=np.float32)
+        if forward_np.shape[0] < 2:
+            raise ValueError("forward must contain at least x, y")
+
+        ideal_position = self._get_door_teleport_position(position_np, forward_np)
+        if ideal_position is None:
+            return None
+        if dynamic_blockers is None:
+            dynamic_blockers = self.dynamic_collision_positions
+
+        resolved = self.find_nearest_collision_free_position(
+            ideal_position,
+            search_radius=self._door_teleport_search_radius(),
+            dynamic_blockers=dynamic_blockers,
+            dynamic_clearance=dynamic_clearance,
+        )
+        return resolved
 
     def _get_door_teleport_position(
         self, position: np.ndarray, forward: np.ndarray

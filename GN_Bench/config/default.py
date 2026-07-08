@@ -207,6 +207,11 @@ _C.SIMULATOR.SEED = _C.SEED
 _C.SIMULATOR.TURN_ANGLE = 10  # angle to rotate left or right in degrees
 _C.SIMULATOR.TILT_ANGLE = 15  # angle to tilt the camera up or down in degrees
 _C.SIMULATOR.COLLIDABLE = True
+_C.SIMULATOR.DOOR_TELEPORT = CN()
+_C.SIMULATOR.DOOR_TELEPORT.ENABLED = True
+_C.SIMULATOR.DOOR_TELEPORT.TRIGGER_DISTANCE = 0.5
+_C.SIMULATOR.DOOR_TELEPORT.LANDING_DISTANCE = 0.3
+_C.SIMULATOR.DOOR_TELEPORT.METADATA_FILE = ""
 _C.SIMULATOR.DEFAULT_AGENT_ID = 0
 # -----------------------------------------------------------------------------
 # SIMULATOR SENSORS

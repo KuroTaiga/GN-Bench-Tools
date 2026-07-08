@@ -50,6 +50,14 @@ from GN_Bench.utils.telesim_actor_utils import (
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
+DEFAULT_DOOR_BBOX_FILENAMES = (
+    "door_bboxes.json",
+    "doors.json",
+    "bboxes.json",
+    "object_bboxes.json",
+    "semantic_annotations.json",
+)
+
 
 class PNGFormatError(RuntimeError):
     """Raised when the PNG file does not meet the expected constraints."""
@@ -486,6 +494,151 @@ def apply_transform_to_actor_frame(
     return transformed
 
 
+def _as_float_list(value: Any) -> Optional[List[float]]:
+    if not isinstance(value, (list, tuple)) or len(value) == 0:
+        return None
+    try:
+        return [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_bbox_2d(raw_bbox: Any) -> Optional[Tuple[float, float, float, float]]:
+    """Return an xy AABB as (min_x, min_y, max_x, max_y)."""
+    if isinstance(raw_bbox, dict):
+        min_vals = (
+            raw_bbox.get("min")
+            or raw_bbox.get("mins")
+            or raw_bbox.get("lower")
+            or raw_bbox.get("lower_bound")
+        )
+        max_vals = (
+            raw_bbox.get("max")
+            or raw_bbox.get("maxs")
+            or raw_bbox.get("upper")
+            or raw_bbox.get("upper_bound")
+        )
+        if min_vals is not None and max_vals is not None:
+            lower = _as_float_list(min_vals)
+            upper = _as_float_list(max_vals)
+            if lower is not None and upper is not None and len(lower) >= 2 and len(upper) >= 2:
+                x0, y0 = lower[0], lower[1]
+                x1, y1 = upper[0], upper[1]
+                return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+        center_vals = raw_bbox.get("center") or raw_bbox.get("centroid")
+        size_vals = raw_bbox.get("size") or raw_bbox.get("extent") or raw_bbox.get("scale")
+        center = _as_float_list(center_vals)
+        size = _as_float_list(size_vals)
+        if center is not None and size is not None and len(center) >= 2 and len(size) >= 2:
+            half_x = abs(size[0]) * 0.5
+            half_y = abs(size[1]) * 0.5
+            return center[0] - half_x, center[1] - half_y, center[0] + half_x, center[1] + half_y
+
+        if {"min_x", "min_y", "max_x", "max_y"}.issubset(raw_bbox):
+            x0 = float(raw_bbox["min_x"])
+            y0 = float(raw_bbox["min_y"])
+            x1 = float(raw_bbox["max_x"])
+            y1 = float(raw_bbox["max_y"])
+            return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+        if {"x_min", "y_min", "x_max", "y_max"}.issubset(raw_bbox):
+            x0 = float(raw_bbox["x_min"])
+            y0 = float(raw_bbox["y_min"])
+            x1 = float(raw_bbox["x_max"])
+            y1 = float(raw_bbox["y_max"])
+            return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+        return None
+
+    vals = _as_float_list(raw_bbox)
+    if vals is None:
+        return None
+    if len(vals) == 4:
+        x0, y0, x1, y1 = vals
+        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+    if len(vals) >= 6:
+        x0, y0, x1, y1 = vals[0], vals[1], vals[3], vals[4]
+        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+    return None
+
+
+def _looks_like_door(entry: Dict[str, Any]) -> bool:
+    for key in ("category", "class", "class_name", "label", "name", "object_type", "type"):
+        value = entry.get(key)
+        if isinstance(value, str) and "door" in value.lower():
+            return True
+    return False
+
+
+def _extract_door_bboxes(
+    payload: Any, *, accept_unlabeled: bool = False
+) -> List[Tuple[float, float, float, float]]:
+    bboxes: List[Tuple[float, float, float, float]] = []
+
+    def visit(node: Any, parent_is_door: bool = False) -> None:
+        if isinstance(node, dict):
+            is_door = parent_is_door or _looks_like_door(node)
+            bbox_keys = (
+                "bbox",
+                "bbox_2d",
+                "bbox3d",
+                "bbox_3d",
+                "aabb",
+                "bounds",
+                "bounding_box",
+            )
+            for key in bbox_keys:
+                if key in node and (is_door or accept_unlabeled):
+                    bbox = _normalize_bbox_2d(node[key])
+                    if bbox is not None:
+                        bboxes.append(bbox)
+            if (is_door or accept_unlabeled) and any(
+                key in node
+                for key in (
+                    "min",
+                    "mins",
+                    "lower",
+                    "lower_bound",
+                    "max",
+                    "maxs",
+                    "upper",
+                    "upper_bound",
+                    "center",
+                    "centroid",
+                    "size",
+                    "extent",
+                    "scale",
+                    "min_x",
+                    "x_min",
+                )
+            ):
+                bbox = _normalize_bbox_2d(node)
+                if bbox is not None:
+                    bboxes.append(bbox)
+            for key, value in node.items():
+                visit(value, is_door or "door" in str(key).lower())
+        elif isinstance(node, list):
+            bbox = _normalize_bbox_2d(node)
+            if accept_unlabeled and bbox is not None:
+                bboxes.append(bbox)
+                return
+            for item in node:
+                visit(item, parent_is_door)
+
+    visit(payload)
+
+    deduped: List[Tuple[float, float, float, float]] = []
+    seen = set()
+    for bbox in bboxes:
+        key = tuple(round(v, 4) for v in bbox)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(bbox)
+    return deduped
+
+
 # =============================================================================
 #  GN_Bench Simulator Implementation
 # =============================================================================
@@ -576,6 +729,7 @@ class GNBenchSim(Simulator):
         self.scene_rest_dim: int = 0
         self.actor_seq_dir: Optional[Path] = None
         self.actor_enabled: bool = False
+        self.door_bboxes: List[Tuple[float, float, float, float]] = []
 
         self._initialize_sensors()
 
@@ -612,6 +766,7 @@ class GNBenchSim(Simulator):
         points, pixels = self._load_raster_points(ref_json)
         self.path_length = self._compute_path_length(points)
         self.affine = derive_affine_transform(points, pixels, self.meta)
+        self.door_bboxes = self._load_door_bboxes(scene_dir)
 
         # 2. Load Occupancy Map for Pathfinding
         occ_path = scene_dir / "occupancy.png"
@@ -820,6 +975,7 @@ class GNBenchSim(Simulator):
         prev_rot_obj = R.from_quat(self.agent_state.rotation)
 
         moved = False
+        door_teleported = False
         if isinstance(action, dict) and "position" in action:
             self.agent_state.position = np.array(action["position"], dtype=np.float32)
             if "rotation" in action:
@@ -843,11 +999,16 @@ class GNBenchSim(Simulator):
             if action_id == 1:
                 local_fwd = np.array([1, 0, 0], dtype=np.float32)
                 world_fwd = prev_rot_obj.apply(local_fwd)
-                new_pos = prev_pos + world_fwd * move_dist
+                teleport_pos = self._get_door_teleport_position(prev_pos, world_fwd)
+                if teleport_pos is not None:
+                    new_pos = teleport_pos
+                    door_teleported = True
+                else:
+                    new_pos = prev_pos + world_fwd * move_dist
                 self.agent_state.position = new_pos
                 moved = True
 
-            elif action_id == 2:  # TURN_LEFT
+            if action_id == 2:  # TURN_LEFT
                 delta_rot = R.from_euler("z", turn_angle, degrees=False)
                 new_rot_obj = prev_rot_obj * delta_rot
                 self.agent_state.rotation = new_rot_obj.as_quat()
@@ -859,7 +1020,7 @@ class GNBenchSim(Simulator):
 
         # Always compute clipped passable position so geodesic fallback can use it.
         # COLLIDABLE only controls whether agent pose is physically clamped.
-        if moved:
+        if moved and not door_teleported:
             min_margin = self.margins[-1]
             grid = self.safe_passable_grids.get(min_margin)
             if grid is not None:
@@ -1044,6 +1205,178 @@ class GNBenchSim(Simulator):
     # --- Utils ---
     def get_agent_state(self, agent_id: int = 0) -> AgentState:
         return self.agent_state
+
+    def _door_teleport_config(self) -> Any:
+        return getattr(self.config, "DOOR_TELEPORT", None)
+
+    def _door_teleport_enabled(self) -> bool:
+        cfg = self._door_teleport_config()
+        if cfg is None:
+            return True
+        return bool(getattr(cfg, "ENABLED", True))
+
+    def _door_teleport_trigger_distance(self) -> float:
+        cfg = self._door_teleport_config()
+        if cfg is None:
+            return 0.5
+        return float(getattr(cfg, "TRIGGER_DISTANCE", 0.5))
+
+    def _door_teleport_landing_distance(self) -> float:
+        cfg = self._door_teleport_config()
+        if cfg is None:
+            return 0.3
+        return float(getattr(cfg, "LANDING_DISTANCE", 0.3))
+
+    def _load_door_bboxes(
+        self, scene_dir: Path
+    ) -> List[Tuple[float, float, float, float]]:
+        cfg = self._door_teleport_config()
+        configured = ""
+        if cfg is not None:
+            configured = str(getattr(cfg, "METADATA_FILE", "") or "")
+
+        candidates: List[Tuple[Path, bool]] = []
+        if configured:
+            metadata_path = Path(configured)
+            if not metadata_path.is_absolute():
+                metadata_path = scene_dir / metadata_path
+            candidates.append((metadata_path, True))
+        else:
+            for filename in DEFAULT_DOOR_BBOX_FILENAMES:
+                candidates.append(
+                    (
+                        scene_dir / filename,
+                        filename in {"door_bboxes.json", "doors.json"},
+                    )
+                )
+
+        for path, accept_unlabeled in candidates:
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"Warning: Failed to load door bbox metadata from {path}: {exc}")
+                continue
+
+            bboxes = _extract_door_bboxes(payload, accept_unlabeled=accept_unlabeled)
+            if bboxes:
+                print(f"Door teleport: loaded {len(bboxes)} door bbox(es) from {path}")
+                return bboxes
+
+        return []
+
+    def _distance_to_bbox_edge(
+        self, xy: np.ndarray, bbox: Tuple[float, float, float, float]
+    ) -> float:
+        x, y = float(xy[0]), float(xy[1])
+        min_x, min_y, max_x, max_y = bbox
+
+        if min_x <= x <= max_x and min_y <= y <= max_y:
+            return min(x - min_x, max_x - x, y - min_y, max_y - y)
+
+        dx = max(min_x - x, 0.0, x - max_x)
+        dy = max(min_y - y, 0.0, y - max_y)
+        return math.hypot(dx, dy)
+
+    def _ray_intersects_bbox(
+        self,
+        origin_xy: np.ndarray,
+        direction_xy: np.ndarray,
+        bbox: Tuple[float, float, float, float],
+    ) -> bool:
+        min_x, min_y, max_x, max_y = bbox
+        t_min = 0.0
+        t_max = float("inf")
+
+        for axis, lower, upper in ((0, min_x, max_x), (1, min_y, max_y)):
+            origin = float(origin_xy[axis])
+            direction = float(direction_xy[axis])
+            if abs(direction) < EPS:
+                if origin < lower or origin > upper:
+                    return False
+                continue
+
+            t1 = (lower - origin) / direction
+            t2 = (upper - origin) / direction
+            t_near = min(t1, t2)
+            t_far = max(t1, t2)
+            t_min = max(t_min, t_near)
+            t_max = min(t_max, t_far)
+            if t_min > t_max:
+                return False
+
+        return t_max >= 0.0
+
+    def _door_crossing_axis(
+        self, bbox: Tuple[float, float, float, float], direction_xy: np.ndarray
+    ) -> int:
+        min_x, min_y, max_x, max_y = bbox
+        size_x = max_x - min_x
+        size_y = max_y - min_y
+        if abs(size_x - size_y) > EPS:
+            return 0 if size_x < size_y else 1
+        return 0 if abs(float(direction_xy[0])) >= abs(float(direction_xy[1])) else 1
+
+    def _door_teleport_candidate(
+        self,
+        position: np.ndarray,
+        direction_xy: np.ndarray,
+        bbox: Tuple[float, float, float, float],
+    ) -> Optional[np.ndarray]:
+        origin_xy = np.asarray(position[:2], dtype=np.float32)
+        trigger_distance = self._door_teleport_trigger_distance()
+        if self._distance_to_bbox_edge(origin_xy, bbox) > trigger_distance:
+            return None
+        if not self._ray_intersects_bbox(origin_xy, direction_xy, bbox):
+            return None
+
+        min_x, min_y, max_x, max_y = bbox
+        center_x = 0.5 * (min_x + max_x)
+        center_y = 0.5 * (min_y + max_y)
+        landing_distance = self._door_teleport_landing_distance()
+
+        target_xy = np.array([center_x, center_y], dtype=np.float32)
+        axis = self._door_crossing_axis(bbox, direction_xy)
+        bounds = (min_x, max_x) if axis == 0 else (min_y, max_y)
+        center = center_x if axis == 0 else center_y
+
+        side = -1.0 if float(origin_xy[axis]) < center else 1.0
+        if min_x <= origin_xy[0] <= max_x and min_y <= origin_xy[1] <= max_y:
+            side = -1.0 if float(direction_xy[axis]) >= 0.0 else 1.0
+        target_xy[axis] = (
+            bounds[1] + landing_distance
+            if side < 0.0
+            else bounds[0] - landing_distance
+        )
+
+        return np.array([target_xy[0], target_xy[1], position[2]], dtype=np.float32)
+
+    def _get_door_teleport_position(
+        self, position: np.ndarray, forward: np.ndarray
+    ) -> Optional[np.ndarray]:
+        if not self._door_teleport_enabled() or not self.door_bboxes:
+            return None
+
+        direction_xy = np.asarray(forward[:2], dtype=np.float32)
+        norm = float(np.linalg.norm(direction_xy))
+        if norm < EPS:
+            return None
+        direction_xy = direction_xy / norm
+
+        best_pos = None
+        best_distance = float("inf")
+        origin_xy = np.asarray(position[:2], dtype=np.float32)
+        for bbox in self.door_bboxes:
+            candidate = self._door_teleport_candidate(position, direction_xy, bbox)
+            if candidate is None:
+                continue
+            distance = self._distance_to_bbox_edge(origin_xy, bbox)
+            if distance < best_distance:
+                best_distance = distance
+                best_pos = candidate
+        return best_pos
 
     def set_agent_state(
         self,

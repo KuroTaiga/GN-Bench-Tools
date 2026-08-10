@@ -2,8 +2,6 @@ import collections
 from typing import Any, Callable, DefaultDict, Optional, Type
 
 from GN_Bench.core.dataset import Dataset
-from GN_Bench.core.embodied_task import Action, EmbodiedTask, Measure
-from GN_Bench.core.simulator import ActionSpaceConfiguration, Sensor, Simulator
 from GN_Bench.core.utils import Singleton
 
 
@@ -35,25 +33,50 @@ class Registry(metaclass=Singleton):
 
     @classmethod
     def register_task(cls, to_register=None, *, name: Optional[str] = None):
-        return cls._register_impl("task", to_register, name, assert_type=EmbodiedTask)
+        return cls._register_impl(
+            "task",
+            to_register,
+            name,
+            assert_type=_lazy_type("GN_Bench.core.embodied_task", "EmbodiedTask"),
+        )
 
     @classmethod
     def register_simulator(
         cls, to_register: None = None, *, name: Optional[str] = None
     ):
-        return cls._register_impl("sim", to_register, name, assert_type=Simulator)
+        return cls._register_impl(
+            "sim",
+            to_register,
+            name,
+            assert_type=_lazy_type("GN_Bench.core.simulator", "Simulator"),
+        )
 
     @classmethod
     def register_sensor(cls, to_register=None, *, name: Optional[str] = None):
-        return cls._register_impl("sensor", to_register, name, assert_type=Sensor)
+        return cls._register_impl(
+            "sensor",
+            to_register,
+            name,
+            assert_type=_lazy_type("GN_Bench.core.simulator", "Sensor"),
+        )
 
     @classmethod
     def register_measure(cls, to_register=None, *, name: Optional[str] = None):
-        return cls._register_impl("measure", to_register, name, assert_type=Measure)
+        return cls._register_impl(
+            "measure",
+            to_register,
+            name,
+            assert_type=_lazy_type("GN_Bench.core.embodied_task", "Measure"),
+        )
 
     @classmethod
     def register_task_action(cls, to_register=None, *, name: Optional[str] = None):
-        return cls._register_impl("task_action", to_register, name, assert_type=Action)
+        return cls._register_impl(
+            "task_action",
+            to_register,
+            name,
+            assert_type=_lazy_type("GN_Bench.core.embodied_task", "Action"),
+        )
 
     @classmethod
     def register_dataset(cls, to_register=None, *, name: Optional[str] = None):
@@ -67,7 +90,9 @@ class Registry(metaclass=Singleton):
             "action_space_config",
             to_register,
             name,
-            assert_type=ActionSpaceConfiguration,
+            assert_type=_lazy_type(
+                "GN_Bench.core.simulator", "ActionSpaceConfiguration"
+            ),
         )
 
     @classmethod
@@ -75,23 +100,23 @@ class Registry(metaclass=Singleton):
         return cls.mapping[_type].get(name, None)
 
     @classmethod
-    def get_task(cls, name: str) -> Type[EmbodiedTask]:
+    def get_task(cls, name: str) -> Type[Any]:
         return cls._get_impl("task", name)
 
     @classmethod
-    def get_task_action(cls, name: str) -> Type[Action]:
+    def get_task_action(cls, name: str) -> Type[Any]:
         return cls._get_impl("task_action", name)
 
     @classmethod
-    def get_simulator(cls, name: str) -> Type[Simulator]:
+    def get_simulator(cls, name: str) -> Type[Any]:
         return cls._get_impl("sim", name)
 
     @classmethod
-    def get_sensor(cls, name: str) -> Type[Sensor]:
+    def get_sensor(cls, name: str) -> Type[Any]:
         return cls._get_impl("sensor", name)
 
     @classmethod
-    def get_measure(cls, name: str) -> Type[Measure]:
+    def get_measure(cls, name: str) -> Type[Any]:
         return cls._get_impl("measure", name)
 
     @classmethod
@@ -101,8 +126,13 @@ class Registry(metaclass=Singleton):
     @classmethod
     def get_action_space_configuration(
         cls, name: str
-    ) -> Type[ActionSpaceConfiguration]:
+    ) -> Type[Any]:
         return cls._get_impl("action_space_config", name)
+
+
+def _lazy_type(module_name: str, attribute_name: str) -> Type:
+    module = __import__(module_name, fromlist=[attribute_name])
+    return getattr(module, attribute_name)
 
 
 registry = Registry()

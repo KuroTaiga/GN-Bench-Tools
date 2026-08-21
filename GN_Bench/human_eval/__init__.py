@@ -6,6 +6,7 @@ plus RL task integration.
 """
 
 from .baseline_runner import POLICY_CLASSES, run_policies_on_episode
+from .dagger import DaggerCollectionConfig, HumanDaggerCollector
 from .evaluator import HumanCentricEvaluator, ReplayResult
 from .dataset import HumanCentricDataset
 from .rl_task import HumanCentricRLTask
@@ -15,6 +16,8 @@ __all__ = [
     "HumanCentricDataset",
     "HumanCentricEpisode",
     "HumanCentricEvaluator",
+    "DaggerCollectionConfig",
+    "HumanDaggerCollector",
     "POLICY_CLASSES",
     "HumanCentricRLTask",
     "NavDPScenarioAdapter",

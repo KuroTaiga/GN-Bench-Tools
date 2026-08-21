@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .scenario_adapter import HumanCentricEpisode
+from .target_difficulty import compute_human_identification_difficulty
 
 
 JsonDict = dict[str, Any]
@@ -267,6 +268,11 @@ def _evaluate_deliver_to_human(
         non_target_contact_threshold_m,
     )
     personal_space = _non_target_personal_space_metrics(payload, robot, humans, target_human_id)
+    identification_difficulty = compute_human_identification_difficulty(
+        humans,
+        target_human_id,
+        robot=robot,
+    )
     object_delivered = correct_human_reached and deadline_success
     non_target_physical_clearance_respected = wrong_human_contact_count == 0
     success = (
@@ -294,6 +300,10 @@ def _evaluate_deliver_to_human(
         "non_target_physical_clearance_respected": non_target_physical_clearance_respected,
         "personal_space_respected": non_target_physical_clearance_respected,
         **personal_space,
+        **identification_difficulty,
+        "deliver_to_human_target_identification_difficulty": identification_difficulty[
+            "human_identification_difficulty"
+        ],
         "evidence": "trajectory_contact",
     }
 
@@ -1027,6 +1037,18 @@ def _summarize_mission_results(mission_results: list[JsonDict]) -> JsonDict:
                 ),
                 "personal_space_violation_duration_s": sum(
                     float(result.get("personal_space_violation_duration_s", 0.0))
+                    for result in deliver_results
+                ),
+                "mean_deliver_to_human_target_identification_difficulty": _mean_optional(
+                    result.get("deliver_to_human_target_identification_difficulty")
+                    for result in deliver_results
+                ),
+                "max_deliver_to_human_target_identification_difficulty": _max_optional(
+                    result.get("deliver_to_human_target_identification_difficulty")
+                    for result in deliver_results
+                ),
+                "human_identification_confuser_count": sum(
+                    int(result.get("human_identification_confuser_count", 0))
                     for result in deliver_results
                 ),
             }
@@ -2996,6 +3018,15 @@ def _max_optional(values: Any) -> float | None:
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     ]
     return max(numeric_values) if numeric_values else None
+
+
+def _mean_optional(values: Any) -> float | None:
+    numeric_values = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    return sum(numeric_values) / len(numeric_values) if numeric_values else None
 
 
 def _optional_number(value: Any) -> float | None:

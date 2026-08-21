@@ -75,12 +75,80 @@ class NavDPHumanEvalBridgeTest(unittest.TestCase):
             self.assertTrue(replay.mission_results[0]["object_delivered"])
             self.assertTrue(replay.mission_results[0]["deadline_success"])
             self.assertEqual(replay.mission_results[0]["wrong_human_contact_count"], 0)
+            self.assertEqual(replay.mission_results[0]["human_identification_difficulty"], 0.0)
 
             policy_result = run_policy_assignment_sweep("oracle_human_centric", episode)
             self.assertEqual(policy_result["metrics"]["assignment_coverage"], 1.0)
             self.assertEqual(
                 policy_result["metrics"]["oracle_assignment_match_rate"],
                 1.0,
+            )
+
+    def test_deliver_to_human_reports_group_identification_difficulty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path, scenario_path = _write_navdp_fixture(root)
+            scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+            scenario["humans"] = [
+                _delivery_human(
+                    "human_target",
+                    [2.0, 2.0],
+                    avatar_id="avatar_red_black_01",
+                    shirt_color="red",
+                    pants_color="black",
+                    hair_asset_id="hair_short_black",
+                    role="target_person",
+                ),
+                _delivery_human(
+                    "human_near_confuser",
+                    [3.0, 2.0],
+                    avatar_id="avatar_red_black_01",
+                    shirt_color="red",
+                    pants_color="black",
+                    hair_asset_id="hair_short_black",
+                    role="visitor",
+                ),
+                _delivery_human(
+                    "human_far_confuser",
+                    [20.0, 20.0],
+                    avatar_id="avatar_red_black_01",
+                    shirt_color="red",
+                    pants_color="black",
+                    hair_asset_id="hair_short_black",
+                    role="visitor",
+                ),
+                _delivery_human(
+                    "human_distinct",
+                    [4.0, 5.0],
+                    avatar_id="avatar_blue_gray_09",
+                    shirt_color="blue",
+                    pants_color="gray",
+                    hair_asset_id="hair_long_blonde",
+                    role="visitor",
+                ),
+            ]
+            scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+
+            replay = HumanCentricEvaluator().replay(
+                NavDPScenarioAdapter(navdp_root=root).load_split(manifest_path)[0]
+            )
+            mission_result = replay.mission_results[0]
+
+            self.assertTrue(replay.success)
+            self.assertGreater(mission_result["human_identification_difficulty"], 0.25)
+            self.assertEqual(
+                mission_result["human_identification_best_confuser_id"],
+                "human_near_confuser",
+            )
+            self.assertGreaterEqual(mission_result["human_identification_confuser_count"], 1)
+            self.assertEqual(
+                mission_result["deliver_to_human_target_identification_difficulty"],
+                mission_result["human_identification_difficulty"],
+            )
+            self.assertEqual(replay.metrics["human_identification_confuser_count"], 1)
+            self.assertEqual(
+                replay.metrics["mean_deliver_to_human_target_identification_difficulty"],
+                mission_result["human_identification_difficulty"],
             )
 
     def test_replay_backed_rl_task_accepts_baseline_action_and_rewards(self) -> None:
@@ -531,6 +599,34 @@ def _write_navdp_fixture(root: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return manifest_path, scenario_path
+
+
+def _delivery_human(
+    human_id: str,
+    xy: list[float],
+    *,
+    avatar_id: str,
+    shirt_color: str,
+    pants_color: str,
+    hair_asset_id: str,
+    role: str,
+) -> dict:
+    return {
+        "human_id": human_id,
+        "role": role,
+        "appearance": {
+            "avatar_id": avatar_id,
+            "shirt_color": shirt_color,
+            "pants_color": pants_color,
+            "hair_asset_id": hair_asset_id,
+            "body_shape_bucket": "adult_medium",
+        },
+        "start_map_pose": {"x": xy[0], "y": xy[1], "yaw": 0.0},
+        "trajectory": [
+            {"t": 0.0, "map_pose": {"x": xy[0], "y": xy[1], "yaw": 0.0}},
+            {"t": 3.0, "map_pose": {"x": xy[0], "y": xy[1], "yaw": 0.0}},
+        ],
+    }
 
 
 def _write_social_nav_fixture(root: Path, scenario_id: str, human_xy: list[float]) -> Path:

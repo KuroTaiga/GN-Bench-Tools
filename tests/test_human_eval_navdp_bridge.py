@@ -345,6 +345,23 @@ class NavDPHumanEvalBridgeTest(unittest.TestCase):
             self.assertTrue(passing_replay.success)
             self.assertEqual(passing_replay.metrics["serve_queue_success_count"], 2)
             self.assertEqual(passing_replay.metrics["serve_queue_order_preserved_count"], 2)
+            self.assertGreater(
+                passing_replay.metrics["mean_serve_queue_target_identification_difficulty"],
+                0.0,
+            )
+            self.assertGreaterEqual(
+                passing_replay.metrics["serve_queue_human_identification_confuser_count"],
+                1,
+            )
+            first_queue_result = passing_replay.mission_results[0]
+            self.assertEqual(
+                first_queue_result["serve_queue_target_identification_difficulty"],
+                first_queue_result["human_identification_difficulty"],
+            )
+            self.assertEqual(
+                first_queue_result["human_identification_best_confuser_id"],
+                "human_b",
+            )
 
             self.assertFalse(failing_replay.success)
             self.assertLess(failing_replay.metrics["serve_queue_success_count"], 2)

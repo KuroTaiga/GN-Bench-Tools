@@ -519,6 +519,11 @@ def _evaluate_serve_queue(
     collision_count = _checked_collision_count(payload)
     if collision_count is None:
         collision_count = 0
+    identification_difficulty = compute_human_identification_difficulty(
+        humans,
+        target_human_id,
+        robot=robot,
+    )
 
     correct_human_reached = contact_time is not None
     nearest_queue_contact_reached = correct_human_reached
@@ -554,6 +559,10 @@ def _evaluate_serve_queue(
         "queue_order_preserved": queue_order_preserved,
         "deadline_success": deadline_success,
         "collision_count": collision_count,
+        **identification_difficulty,
+        "serve_queue_target_identification_difficulty": identification_difficulty[
+            "human_identification_difficulty"
+        ],
         "evidence": "trajectory_serve_queue",
     }
 
@@ -1172,6 +1181,18 @@ def _summarize_mission_results(mission_results: list[JsonDict]) -> JsonDict:
                     1
                     for result in serve_queue_results
                     if result.get("queue_order_preserved") is True
+                ),
+                "mean_serve_queue_target_identification_difficulty": _mean_optional(
+                    result.get("serve_queue_target_identification_difficulty")
+                    for result in serve_queue_results
+                ),
+                "max_serve_queue_target_identification_difficulty": _max_optional(
+                    result.get("serve_queue_target_identification_difficulty")
+                    for result in serve_queue_results
+                ),
+                "serve_queue_human_identification_confuser_count": sum(
+                    int(result.get("human_identification_confuser_count", 0))
+                    for result in serve_queue_results
                 ),
             }
         )

@@ -41,6 +41,7 @@ class HumanDaggerCollector:
         step_index: int = 0,
         time_s: float | None = None,
         metrics_snapshot: JsonDict | None = None,
+        collection_context: JsonDict | None = None,
     ) -> HumanDaggerSample:
         mission = _select_mission(episode.payload, observation, model_action)
         mission_type = str(mission.get("mission_type", ""))
@@ -71,6 +72,7 @@ class HumanDaggerCollector:
             mission_context=handler.mission_context(context),
             metrics_snapshot=metrics_snapshot or {},
             collection_config=self.config.to_json_dict(),
+            collection_context=collection_context or {},
         )
 
     def render_sample(self, sample: HumanDaggerSample, model_family: str | None = None) -> JsonDict:
@@ -82,12 +84,56 @@ class HumanDaggerCollector:
             "mission_id": sample.mission_id,
             "faults": [fault.fault_type for fault in sample.validation.faults],
             "collection_config": sample.collection_config,
+            "collection_context": sample.collection_context,
             "schema_version": sample.schema_version,
         }
         return rendered
 
     def select_history_indices(self, history_length: int) -> list[int]:
         return self.history_selector.select_indices(history_length)
+
+    def observe_step(
+        self,
+        episode: HumanCentricEpisode,
+        observation: JsonDict,
+        model_action: JsonDict,
+        *,
+        model_family: str,
+        step_index: int | None = None,
+        time_s: float | None = None,
+        post_step_info: JsonDict | None = None,
+        metrics_snapshot: JsonDict | None = None,
+        history_frames: list[Any] | None = None,
+        output_path: str | Path | None = None,
+        append_only_trainable: bool = True,
+    ) -> HumanDaggerSample:
+        """Build and optionally persist a DAgger sample for one rollout step."""
+
+        merged_metrics = _merge_metrics(metrics_snapshot, post_step_info)
+        collection_context = _collection_context(
+            post_step_info=post_step_info,
+            history_frame_count=len(history_frames) if history_frames is not None else None,
+            history_indices=self.select_history_indices(len(history_frames))
+            if history_frames is not None
+            else None,
+        )
+        sample = self.build_sample(
+            episode,
+            observation,
+            model_action,
+            model_family=model_family,
+            step_index=int(
+                step_index
+                if step_index is not None
+                else observation.get("step_index", model_action.get("step_index", 0))
+            ),
+            time_s=time_s,
+            metrics_snapshot=merged_metrics,
+            collection_context=collection_context,
+        )
+        if output_path is not None and (sample.trainable or not append_only_trainable):
+            self.append_jsonl(output_path, sample, model_family=model_family)
+        return sample
 
     def append_jsonl(
         self,
@@ -149,6 +195,47 @@ def _dict_list(value: Any) -> list[JsonDict]:
 
 def _dict_value(value: Any) -> JsonDict:
     return value if isinstance(value, dict) else {}
+
+
+def _merge_metrics(
+    metrics_snapshot: JsonDict | None,
+    post_step_info: JsonDict | None,
+) -> JsonDict:
+    merged: JsonDict = {}
+    if isinstance(metrics_snapshot, dict):
+        merged.update(metrics_snapshot)
+    if not isinstance(post_step_info, dict):
+        return merged
+    replay = _dict_value(post_step_info.get("replay"))
+    replay_metrics = _dict_value(replay.get("metrics"))
+    if replay_metrics:
+        merged.update(replay_metrics)
+    reward_components = _dict_value(post_step_info.get("reward_components"))
+    if reward_components:
+        merged["reward_components"] = reward_components
+    post_metrics = _dict_value(post_step_info.get("metrics"))
+    if post_metrics:
+        merged.update(post_metrics)
+    return merged
+
+
+def _collection_context(
+    *,
+    post_step_info: JsonDict | None,
+    history_frame_count: int | None,
+    history_indices: list[int] | None,
+) -> JsonDict:
+    context: JsonDict = {}
+    if history_frame_count is not None:
+        context["history_frame_count"] = int(history_frame_count)
+        context["history_indices"] = history_indices or []
+    if isinstance(post_step_info, dict):
+        accepted_action = _dict_value(post_step_info.get("accepted_action"))
+        if accepted_action:
+            context["accepted_action"] = accepted_action
+        if "already_done" in post_step_info:
+            context["already_done"] = bool(post_step_info.get("already_done"))
+    return context
 
 
 def _number(value: Any, default: float) -> float:

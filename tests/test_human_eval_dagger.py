@@ -11,6 +11,7 @@ from GN_Bench.human_eval.dagger import (
     HumanDaggerCollector,
     build_default_mission_registry,
     build_default_model_adapter_registry,
+    recovery_counts_from_metrics,
     sample_from_json_dict,
 )
 from GN_Bench.human_eval.rl_task import HumanCentricRLTask
@@ -129,6 +130,129 @@ class HumanDaggerScaffoldTest(unittest.TestCase):
                 self.assertEqual(rendered["model_family"], model_family)
                 self.assertTrue(rendered["trainable"])
 
+    def test_observe_step_writes_trainable_jsonl_with_history_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_delivery_fixture(root)
+            )
+            observation = HumanCentricRLTask().reset(episode)
+            model_action = {
+                "robot_id": "robot_alpha",
+                "action_type": "assign_mission",
+                "payload": {
+                    "mission_id": "mission_deliver_to_human_001",
+                    "target_human_id": "human_wrong",
+                },
+            }
+            output_path = root / "dagger.jsonl"
+
+            sample = HumanDaggerCollector().observe_step(
+                episode,
+                observation,
+                model_action,
+                model_family="json_policy",
+                post_step_info={
+                    "metrics": {
+                        "wrong_human_contact_count": 1,
+                        "human_identification_difficulty": 0.8,
+                    }
+                },
+                history_frames=list(range(101)),
+                output_path=output_path,
+            )
+
+            self.assertTrue(sample.trainable)
+            self.assertIn(
+                "unsafe_human_approach",
+                [fault.fault_type for fault in sample.validation.faults],
+            )
+            self.assertEqual(sample.collection_context["history_frame_count"], 101)
+            self.assertEqual(sample.collection_context["history_indices"][-1], 100)
+            rendered = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(rendered["source_sample"]["collection_context"]["history_frame_count"], 101)
+
+    def test_serve_queue_oracle_waits_for_pending_previous_member(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_serve_queue_dagger_fixture(root)
+            )
+            observation = HumanCentricRLTask().reset(episode)
+            observation["completed_mission_ids"] = []
+            model_action = {
+                "robot_id": "robot_alpha",
+                "action_type": "assign_mission",
+                "payload": {
+                    "mission_id": "mission_serve_queue_002",
+                    "target_human_id": "human_b",
+                },
+            }
+
+            sample = HumanDaggerCollector().build_sample(
+                episode,
+                observation,
+                model_action,
+                model_family="json_policy",
+            )
+
+            self.assertIn(
+                "wait_required",
+                [fault.fault_type for fault in sample.validation.faults],
+            )
+            self.assertEqual(sample.oracle.action_type, "no_op")
+            self.assertEqual(
+                sample.oracle.payload["wait_for_mission_ids"],
+                ["mission_serve_queue_001"],
+            )
+
+    def test_dense_recovery_counts_and_strategy_are_attached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_dense_dagger_fixture(root)
+            )
+            observation = HumanCentricRLTask().reset(episode)
+            model_action = {
+                "robot_id": "robot_alpha",
+                "action_type": "set_subgoal",
+                "payload": {"mission_id": "mission_dense_dynamic_humans_001"},
+            }
+            metrics_snapshot = {
+                "collision_count": 1,
+                "dense_robot_human_clearance_policy_respected": False,
+                "robot_stalled_recovery_count": 1,
+                "robot_teleport_count": 1,
+                "corner_case_recovery": {
+                    "summary": {
+                        "event_count": 2,
+                        "by_issue_type": {
+                            "safe_reposition": 1,
+                            "robot_human_collision": 1,
+                        },
+                    }
+                },
+            }
+
+            sample = HumanDaggerCollector().build_sample(
+                episode,
+                observation,
+                model_action,
+                model_family="json_policy",
+                metrics_snapshot=metrics_snapshot,
+            )
+            counts = recovery_counts_from_metrics(metrics_snapshot)
+
+            self.assertEqual(counts["stuck_recovery_count"], 1)
+            self.assertEqual(counts["safe_reposition_count"], 1)
+            self.assertEqual(counts["teleport_recovery_count"], 1)
+            self.assertEqual(counts["collision_recovery_count"], 1)
+            self.assertEqual(sample.oracle.recovery["strategy"], "collision_recovery")
+            self.assertIn(
+                "recovery_required",
+                [fault.fault_type for fault in sample.validation.faults],
+            )
+
     def test_history_selector_matches_previous_dagger_example(self) -> None:
         selector = DaggerHistorySelector(
             DaggerCollectionConfig(history_sampling="uniform", history_end="previous")
@@ -211,6 +335,136 @@ def _write_delivery_fixture(root: Path) -> Path:
     }
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
     return scenario_path
+
+
+def _write_serve_queue_dagger_fixture(root: Path) -> Path:
+    (root / "test_scenes/demo_scene").mkdir(parents=True, exist_ok=True)
+    scenario_dir = root / "scenarios"
+    scenario_dir.mkdir(exist_ok=True)
+    scenario_path = scenario_dir / "fixture_serve_queue_dagger.json"
+    scenario = {
+        "schema_version": "0.1",
+        "scenario_id": "fixture_serve_queue_dagger",
+        "scene_id": "demo_scene",
+        "scene_assets": {
+            "dataset": "fixture_dataset",
+            "scene_dir": "test_scenes/demo_scene",
+        },
+        "robots": [
+            {
+                "robot_id": "robot_alpha",
+                "capabilities": ["navigate", "serve"],
+                "start_map_pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+                "trajectory": [
+                    {"t": 0.0, "map_pose": {"x": 0.0, "y": 0.0, "yaw": 0.0}},
+                    {"t": 2.0, "map_pose": {"x": 2.0, "y": 0.0, "yaw": 0.0}},
+                ],
+            }
+        ],
+        "humans": [
+            _human("human_a", [1.0, 0.0], "queue_participant"),
+            _human("human_b", [2.0, 0.0], "queue_participant"),
+        ],
+        "missions": [
+            _queue_mission(
+                "mission_serve_queue_001",
+                "human_a",
+                queue_index=0,
+                previous_human_ids=[],
+                goal_xy=[1.0, 0.0],
+            ),
+            _queue_mission(
+                "mission_serve_queue_002",
+                "human_b",
+                queue_index=1,
+                previous_human_ids=["human_a"],
+                goal_xy=[2.0, 0.0],
+            ),
+        ],
+        "social_structures": [],
+        "event_log": {"events": []},
+        "expected_result": {"passed": True, "metrics": {"fixture_expected_valid": True}},
+        "metadata": {"collision_check": {"checked": True, "collision_free": True}},
+    }
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    return scenario_path
+
+
+def _write_dense_dagger_fixture(root: Path) -> Path:
+    (root / "test_scenes/demo_scene").mkdir(parents=True, exist_ok=True)
+    scenario_dir = root / "scenarios"
+    scenario_dir.mkdir(exist_ok=True)
+    scenario_path = scenario_dir / "fixture_dense_dagger.json"
+    scenario = {
+        "schema_version": "0.1",
+        "scenario_id": "fixture_dense_dagger",
+        "scene_id": "demo_scene",
+        "scene_assets": {
+            "dataset": "fixture_dataset",
+            "scene_dir": "test_scenes/demo_scene",
+        },
+        "robots": [
+            {
+                "robot_id": "robot_alpha",
+                "capabilities": ["navigate"],
+                "start_map_pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+                "trajectory": [
+                    {"t": 0.0, "map_pose": {"x": 0.0, "y": 0.0, "yaw": 0.0}},
+                    {"t": 2.0, "map_pose": {"x": 2.0, "y": 0.0, "yaw": 0.0}},
+                ],
+            }
+        ],
+        "humans": [_human("human_dense", [1.0, 0.2], "moving_pedestrian")],
+        "missions": [
+            {
+                "mission_id": "mission_dense_dynamic_humans_001",
+                "mission_type": "dense_dynamic_humans",
+                "assigned_robot_id": "robot_alpha",
+                "release_time": 0.0,
+                "deadline": 4.0,
+                "priority": 1,
+                "success_conditions": ["all_active_robot_goal_regions_reached"],
+                "metadata": {
+                    "active_robot_ids": ["robot_alpha"],
+                    "planned_goal_world": [2.0, 0.0],
+                },
+            }
+        ],
+        "social_structures": [],
+        "event_log": {"events": []},
+        "expected_result": {"passed": False, "metrics": {"fixture_expected_valid": True}},
+        "metadata": {"collision_check": {"checked": True, "collision_free": False}},
+    }
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    return scenario_path
+
+
+def _queue_mission(
+    mission_id: str,
+    target_human_id: str,
+    *,
+    queue_index: int,
+    previous_human_ids: list[str],
+    goal_xy: list[float],
+) -> dict:
+    return {
+        "mission_id": mission_id,
+        "mission_type": "serve_queue",
+        "assigned_robot_id": "robot_alpha",
+        "release_time": 0.0,
+        "deadline": 4.0,
+        "priority": queue_index + 1,
+        "target_human_id": target_human_id,
+        "success_conditions": ["nearest_queue_contact_reached", "queue_order_preserved"],
+        "metadata": {
+            "planned_goal_world": goal_xy,
+            "previous_queue_human_ids": previous_human_ids,
+            "queue_id": "queue_001",
+            "queue_index": queue_index,
+            "queue_order": ["human_a", "human_b"],
+            "queue_position": queue_index + 1,
+        },
+    }
 
 
 def _human(human_id: str, xy: list[float], role: str) -> dict:

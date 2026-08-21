@@ -131,6 +131,7 @@ class HumanDaggerSample:
     mission_context: JsonDict = field(default_factory=dict)
     metrics_snapshot: JsonDict = field(default_factory=dict)
     collection_config: JsonDict = field(default_factory=dict)
+    collection_context: JsonDict = field(default_factory=dict)
     rendered_output: JsonDict = field(default_factory=dict)
     schema_version: str = HUMAN_DAGGER_SCHEMA_VERSION
 
@@ -174,6 +175,7 @@ def sample_from_json_dict(payload: JsonDict) -> HumanDaggerSample:
         mission_context=_dict_value(payload.get("mission_context")),
         metrics_snapshot=_dict_value(payload.get("metrics_snapshot")),
         collection_config=_dict_value(payload.get("collection_config")),
+        collection_context=_dict_value(payload.get("collection_context")),
         rendered_output=_dict_value(payload.get("rendered_output")),
         schema_version=str(payload.get("schema_version", HUMAN_DAGGER_SCHEMA_VERSION)),
     )

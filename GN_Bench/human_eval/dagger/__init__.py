@@ -9,6 +9,11 @@ from .mission_handlers import (
     build_default_mission_registry,
 )
 from .model_adapters import ModelDaggerAdapter, build_default_model_adapter_registry
+from .recovery import (
+    DaggerRecoveryStrategy,
+    build_recovery_strategy,
+    recovery_counts_from_metrics,
+)
 from .schema import (
     DaggerCollectionConfig,
     DaggerFault,
@@ -24,6 +29,7 @@ __all__ = [
     "DaggerHistorySelection",
     "DaggerHistorySelector",
     "DaggerOracleCorrection",
+    "DaggerRecoveryStrategy",
     "DaggerValidationResult",
     "FaultCatalogEntry",
     "HumanDaggerCollector",
@@ -33,5 +39,7 @@ __all__ = [
     "ModelDaggerAdapter",
     "build_default_mission_registry",
     "build_default_model_adapter_registry",
+    "build_recovery_strategy",
+    "recovery_counts_from_metrics",
     "sample_from_json_dict",
 ]

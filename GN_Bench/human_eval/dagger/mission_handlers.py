@@ -93,6 +93,10 @@ class MissionDaggerHandler:
             "queue_position": _optional_number(metadata.get("queue_position")),
             "previous_queue_human_ids": _string_list(metadata.get("previous_queue_human_ids")),
             "queue_order": _string_list(metadata.get("queue_order")),
+            "informant_human_id": _human_guided_informant_id(context.mission),
+            "mission_stream_parent_id": str(metadata.get("mission_stream_parent_id", "")),
+            "child_mission_ids": _string_list(metadata.get("child_mission_ids")),
+            "mission_stack_index": _optional_number(metadata.get("mission_stack_index")),
             "fault_catalog": [entry.fault_type for entry in self.fault_catalog],
         }
 
@@ -266,12 +270,125 @@ class ServeQueueDaggerHandler(MissionDaggerHandler):
 class NavigateWithSocialConstraintsDaggerHandler(MissionDaggerHandler):
     mission_type = "navigate_with_social_constraints"
     fault_catalog = (
+        FaultCatalogEntry("goal_not_reached", "Model did not reach the social navigation goal."),
         FaultCatalogEntry("personal_space_violation", "Model violates L1 personal-space rules."),
         FaultCatalogEntry("pedestrian_yield_failure", "Model violates L2 yield timing."),
         FaultCatalogEntry("group_integrity_violation", "Model crosses an L3 protected group region."),
         FaultCatalogEntry("queue_order_violation", "Model violates L4 queue-order constraints."),
         FaultCatalogEntry("collision_or_near_miss", "Model collides or enters unsafe clearance."),
     )
+
+    def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
+        metrics = context.metrics_snapshot
+        faults: list[DaggerFault] = []
+        if metrics.get("goal_reached") is False:
+            faults.append(
+                DaggerFault(
+                    fault_type="goal_not_reached",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "minimum_goal_distance_m": metrics.get("minimum_goal_distance_m"),
+                        "goal_threshold_m": metrics.get("goal_threshold_m"),
+                    },
+                )
+            )
+        if (
+            metrics.get("personal_space_respected") is False
+            or _metric_positive(metrics, "personal_space_violation_count")
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="personal_space_violation",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "personal_space_violation_count": int(
+                            _number(metrics.get("personal_space_violation_count"), 0.0)
+                        ),
+                        "personal_space_violation_human_ids": metrics.get(
+                            "personal_space_violation_human_ids",
+                            [],
+                        ),
+                    },
+                )
+            )
+        if (
+            metrics.get("pedestrian_yield_respected") is False
+            or _metric_positive(metrics, "pedestrian_yield_violation_count")
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="pedestrian_yield_failure",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "pedestrian_yield_violation_count": int(
+                            _number(metrics.get("pedestrian_yield_violation_count"), 0.0)
+                        ),
+                        "pedestrian_yield_min_time_gap_s": metrics.get(
+                            "pedestrian_yield_min_time_gap_s"
+                        ),
+                        "pedestrian_yield_min_distance_m": metrics.get(
+                            "pedestrian_yield_min_distance_m"
+                        ),
+                    },
+                )
+            )
+        if (
+            metrics.get("group_integrity_respected") is False
+            or _metric_positive(metrics, "group_region_violation_count")
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="group_integrity_violation",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "group_region_violation_count": int(
+                            _number(metrics.get("group_region_violation_count"), 0.0)
+                        ),
+                        "group_region_min_clearance_m": metrics.get(
+                            "group_region_min_clearance_m"
+                        ),
+                    },
+                )
+            )
+        if (
+            metrics.get("queue_order_respected") is False
+            or _metric_positive(metrics, "queue_order_violation_count")
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="queue_order_violation",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "queue_order_violation_count": int(
+                            _number(metrics.get("queue_order_violation_count"), 0.0)
+                        ),
+                        "queue_terminal_tail_distance_m": metrics.get(
+                            "queue_terminal_tail_distance_m"
+                        ),
+                        "queue_terminal_service_distance_m": metrics.get(
+                            "queue_terminal_service_distance_m"
+                        ),
+                    },
+                )
+            )
+        if _metric_positive(metrics, "collision_count") or metrics.get("collision_free") is False:
+            faults.append(
+                DaggerFault(
+                    fault_type="collision_or_near_miss",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "collision_count": int(_number(metrics.get("collision_count"), 0.0)),
+                        "min_clearance_m": metrics.get("min_clearance_m"),
+                    },
+                )
+            )
+        return faults
 
 
 class HumanGuidedUncertainRegionDaggerHandler(MissionDaggerHandler):
@@ -283,6 +400,105 @@ class HumanGuidedUncertainRegionDaggerHandler(MissionDaggerHandler):
         FaultCatalogEntry("resolved_target_ignored", "Model ignores the clarified target."),
     )
 
+    def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
+        metrics = context.metrics_snapshot
+        faults: list[DaggerFault] = []
+        informant_id = _human_guided_informant_id(context.mission)
+        action_target = _action_human_target(context.model_action)
+        if metrics.get("guidance_requested") is False and not _action_requests_guidance(
+            context.model_action
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="guidance_not_requested",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={"informant_human_id": informant_id},
+                )
+            )
+        if action_target and informant_id and action_target != informant_id:
+            faults.append(
+                DaggerFault(
+                    fault_type="wrong_informant",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "expected_informant_human_id": informant_id,
+                        "model_target_human_id": action_target,
+                    },
+                )
+            )
+        if (
+            metrics.get("guidance_stop_required") is True
+            and metrics.get("guidance_stop_verified") is False
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="guidance_wait_violation",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "guidance_stop_interval_s": metrics.get("guidance_stop_interval_s"),
+                        "guidance_stop_max_displacement_m": metrics.get(
+                            "guidance_stop_max_displacement_m"
+                        ),
+                    },
+                )
+            )
+        if (
+            metrics.get("uncertainty_resolved") is True
+            and metrics.get("resolved_target_reached") is False
+        ) or metrics.get("resolved_target_ignored") is True:
+            faults.append(
+                DaggerFault(
+                    fault_type="resolved_target_ignored",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "resolved_target_xy": metrics.get("resolved_target_xy"),
+                        "minimum_goal_distance_m": metrics.get("minimum_goal_distance_m"),
+                    },
+                )
+            )
+        return faults
+
+    def oracle_correction(
+        self,
+        context: MissionDaggerContext,
+        validation: DaggerValidationResult,
+    ) -> DaggerOracleCorrection:
+        fault_types = {fault.fault_type for fault in validation.faults}
+        if "guidance_not_requested" in fault_types or "wrong_informant" in fault_types:
+            informant_id = _human_guided_informant_id(context.mission)
+            return DaggerOracleCorrection(
+                oracle_intent="request_human_guidance",
+                action_type="interact",
+                payload={
+                    "mission_id": context.mission_id,
+                    "mission_type": context.mission_type,
+                    "interaction": "request_guidance",
+                    "target_human_id": informant_id,
+                    "route_mode": "oracle_human_dagger",
+                },
+                recovery=_oracle_recovery(context, validation),
+                source=f"{type(self).__name__}.oracle_correction",
+                trainable=True,
+            )
+        if "guidance_wait_violation" in fault_types:
+            return DaggerOracleCorrection(
+                oracle_intent="wait_for_human_guidance",
+                action_type="no_op",
+                payload={
+                    "mission_id": context.mission_id,
+                    "mission_type": context.mission_type,
+                    "route_mode": "oracle_human_dagger",
+                },
+                recovery=_oracle_recovery(context, validation),
+                source=f"{type(self).__name__}.oracle_correction",
+                trainable=True,
+            )
+        return super().oracle_correction(context, validation)
+
 
 class MissionStreamDaggerHandler(MissionDaggerHandler):
     mission_type = "mission_stream"
@@ -291,7 +507,129 @@ class MissionStreamDaggerHandler(MissionDaggerHandler):
         FaultCatalogEntry("missed_release", "Model ignores a released child mission."),
         FaultCatalogEntry("wrong_child_assignment", "Model assigns the wrong robot or child mission."),
         FaultCatalogEntry("missing_eos", "Model completes a child mission without end-of-sequence closeout."),
+        FaultCatalogEntry("terminal_goal_missed", "Mission stream terminal goal was not reached."),
     )
+
+    def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
+        metrics = context.metrics_snapshot
+        if _dict_value(context.mission.get("metadata")).get("mission_stream_parent_id"):
+            return _mission_stream_child_faults(context)
+
+        faults: list[DaggerFault] = []
+        child_count = int(_number(metrics.get("child_mission_count"), 0.0))
+        expected_child_count = int(_number(metrics.get("expected_child_mission_count"), 0.0))
+        if metrics.get("priority_order_respected") is False:
+            faults.append(
+                DaggerFault(
+                    fault_type="priority_inversion",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "child_timing_checks": metrics.get("child_timing_checks", []),
+                        "dispatch_record_count_matches": metrics.get(
+                            "dispatch_record_count_matches"
+                        ),
+                    },
+                )
+            )
+        if (
+            metrics.get("released_missions_completed") is False
+            or (
+                child_count > 0
+                and int(_number(metrics.get("released_child_mission_count"), 0.0))
+                < child_count
+            )
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="missed_release",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "released_child_mission_count": metrics.get(
+                            "released_child_mission_count"
+                        ),
+                        "child_mission_count": child_count,
+                    },
+                )
+            )
+        if (
+            metrics.get("child_ids_present") is False
+            or metrics.get("child_count_matches_config") is False
+            or metrics.get("dispatch_record_count_matches") is False
+            or (
+                child_count > 0
+                and int(_number(metrics.get("assigned_child_mission_count"), 0.0))
+                < child_count
+            )
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="wrong_child_assignment",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "child_ids_present": metrics.get("child_ids_present"),
+                        "child_count_matches_config": metrics.get(
+                            "child_count_matches_config"
+                        ),
+                        "assigned_child_mission_count": metrics.get(
+                            "assigned_child_mission_count"
+                        ),
+                        "expected_child_mission_count": expected_child_count,
+                    },
+                )
+            )
+        if child_count > 0 and int(_number(metrics.get("eos_child_mission_count"), 0.0)) < child_count:
+            faults.append(
+                DaggerFault(
+                    fault_type="missing_eos",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "eos_child_mission_count": metrics.get("eos_child_mission_count"),
+                        "child_mission_count": child_count,
+                    },
+                )
+            )
+        if metrics.get("stream_terminal_goals_reached") is False:
+            faults.append(
+                DaggerFault(
+                    fault_type="terminal_goal_missed",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "stream_terminal_goal_max_distance_m": metrics.get(
+                            "stream_terminal_goal_max_distance_m"
+                        ),
+                        "stream_terminal_goal_checks": metrics.get(
+                            "stream_terminal_goal_checks",
+                            [],
+                        ),
+                    },
+                )
+            )
+        return faults
+
+    def oracle_correction(
+        self,
+        context: MissionDaggerContext,
+        validation: DaggerValidationResult,
+    ) -> DaggerOracleCorrection:
+        if any(fault.fault_type == "missing_eos" for fault in validation.faults):
+            return DaggerOracleCorrection(
+                oracle_intent="mission_stream_eos",
+                action_type="robot_eos",
+                payload={
+                    "mission_id": context.mission_id,
+                    "mission_type": context.mission_type,
+                    "route_mode": "oracle_human_dagger",
+                },
+                recovery=_oracle_recovery(context, validation),
+                source=f"{type(self).__name__}.oracle_correction",
+                trainable=True,
+            )
+        return super().oracle_correction(context, validation)
 
 
 class DenseDynamicHumansDaggerHandler(MissionDaggerHandler):
@@ -649,6 +987,116 @@ def _action_attempts_service(action: JsonDict) -> bool:
     if payload.get("target_human_id") or payload.get("target_region_id"):
         return True
     return action_type in {"assign_mission", "reassign_mission", "set_subgoal", "interact"}
+
+
+def _human_guided_informant_id(mission: JsonDict) -> str:
+    metadata = _dict_value(mission.get("metadata"))
+    human_guidance = _dict_value(metadata.get("human_guidance"))
+    informant_id = human_guidance.get("informant_human_id") or metadata.get(
+        "informant_human_id"
+    )
+    if informant_id:
+        return str(informant_id)
+    active_human_ids = _string_list(metadata.get("active_human_ids"))
+    return active_human_ids[0] if active_human_ids else ""
+
+
+def _action_human_target(action: JsonDict) -> str:
+    payload = _action_payload(action)
+    return str(
+        payload.get("target_human_id")
+        or payload.get("informant_human_id")
+        or payload.get("human_id")
+        or ""
+    )
+
+
+def _action_requests_guidance(action: JsonDict) -> bool:
+    payload = _action_payload(action)
+    action_type = str(action.get("action_type", ""))
+    interaction = str(
+        payload.get("interaction")
+        or payload.get("intent")
+        or payload.get("request_type")
+        or ""
+    ).lower()
+    return action_type == "interact" and any(
+        token in interaction for token in ("guide", "guidance", "clarify", "ask")
+    )
+
+
+def _mission_stream_child_faults(context: MissionDaggerContext) -> list[DaggerFault]:
+    metrics = context.metrics_snapshot
+    faults: list[DaggerFault] = []
+    if metrics.get("release_event_present") is False:
+        faults.append(
+            DaggerFault(
+                fault_type="missed_release",
+                mission_id=context.mission_id,
+                severity="failure",
+                details={
+                    "release_event_time_s": metrics.get("release_event_time_s"),
+                    "expected_release_time_s": metrics.get("expected_release_time_s"),
+                },
+            )
+        )
+    if (
+        metrics.get("assignment_event_present") is False
+        or metrics.get("assignment_time_matches_expected") is False
+    ):
+        faults.append(
+            DaggerFault(
+                fault_type="wrong_child_assignment",
+                mission_id=context.mission_id,
+                severity="failure",
+                details={
+                    "assignment_event_time_s": metrics.get("assignment_event_time_s"),
+                    "expected_assignment_time_s": metrics.get("expected_assignment_time_s"),
+                },
+            )
+        )
+    if (
+        metrics.get("timing_respected") is False
+        or metrics.get("stream_event_order_respected") is False
+    ):
+        faults.append(
+            DaggerFault(
+                fault_type="priority_inversion",
+                mission_id=context.mission_id,
+                severity="failure",
+                details={
+                    "stream_event_order_respected": metrics.get(
+                        "stream_event_order_respected"
+                    ),
+                    "timing_respected": metrics.get("timing_respected"),
+                },
+            )
+        )
+    if metrics.get("eos_event_present") is False or metrics.get("eos_time_matches_expected") is False:
+        faults.append(
+            DaggerFault(
+                fault_type="missing_eos",
+                mission_id=context.mission_id,
+                severity="failure",
+                details={
+                    "eos_time_s": metrics.get("eos_time_s"),
+                    "expected_eos_time_s": metrics.get("expected_eos_time_s"),
+                },
+            )
+        )
+    if metrics.get("goal_reached") is False:
+        faults.append(
+            DaggerFault(
+                fault_type="terminal_goal_missed",
+                mission_id=context.mission_id,
+                severity="failure",
+                details={
+                    "minimum_goal_distance_m": metrics.get("minimum_goal_distance_m"),
+                    "goal_threshold_m": metrics.get("goal_threshold_m"),
+                },
+            )
+        )
+    return faults
 
 
 def _dense_common_faults(context: MissionDaggerContext) -> list[DaggerFault]:

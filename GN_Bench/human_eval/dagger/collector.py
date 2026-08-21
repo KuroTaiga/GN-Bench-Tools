@@ -45,7 +45,10 @@ class HumanDaggerCollector:
     ) -> HumanDaggerSample:
         mission = _select_mission(episode.payload, observation, model_action)
         mission_type = str(mission.get("mission_type", ""))
-        handler = self.mission_handlers.get(mission_type, MissionDaggerHandler())
+        handler = self.mission_handlers.get(
+            _handler_key(mission),
+            self.mission_handlers.get(mission_type, MissionDaggerHandler()),
+        )
         context = MissionDaggerContext(
             episode_id=episode.episode_id,
             scenario_id=str(episode.payload.get("scenario_id", episode.episode_id)),
@@ -185,6 +188,13 @@ def _find_mission(missions: list[JsonDict], mission_id: str) -> JsonDict | None:
         if str(mission.get("mission_id", "")) == mission_id:
             return mission
     return None
+
+
+def _handler_key(mission: JsonDict) -> str:
+    metadata = _dict_value(mission.get("metadata"))
+    if metadata.get("mission_stream_parent_id"):
+        return "mission_stream"
+    return str(mission.get("mission_type", ""))
 
 
 def _dict_list(value: Any) -> list[JsonDict]:

@@ -253,6 +253,171 @@ class HumanDaggerScaffoldTest(unittest.TestCase):
                 [fault.fault_type for fault in sample.validation.faults],
             )
 
+    def test_social_navigation_faults_follow_evaluator_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_social_dagger_fixture(root)
+            )
+            observation = HumanCentricRLTask().reset(episode)
+            model_action = {
+                "robot_id": "robot_alpha",
+                "action_type": "set_subgoal",
+                "payload": {
+                    "mission_id": "mission_social_001",
+                    "target_region_id": "region_goal",
+                },
+            }
+
+            sample = HumanDaggerCollector().build_sample(
+                episode,
+                observation,
+                model_action,
+                model_family="json_policy",
+                metrics_snapshot={
+                    "goal_reached": False,
+                    "minimum_goal_distance_m": 3.2,
+                    "goal_threshold_m": 0.4,
+                    "personal_space_respected": False,
+                    "personal_space_violation_count": 1,
+                    "pedestrian_yield_respected": False,
+                    "pedestrian_yield_violation_count": 1,
+                    "group_integrity_respected": False,
+                    "group_region_violation_count": 1,
+                    "queue_order_respected": False,
+                    "queue_order_violation_count": 1,
+                    "collision_count": 1,
+                },
+            )
+            fault_types = [fault.fault_type for fault in sample.validation.faults]
+
+            self.assertIn("goal_not_reached", fault_types)
+            self.assertIn("personal_space_violation", fault_types)
+            self.assertIn("pedestrian_yield_failure", fault_types)
+            self.assertIn("group_integrity_violation", fault_types)
+            self.assertIn("queue_order_violation", fault_types)
+            self.assertIn("collision_or_near_miss", fault_types)
+
+    def test_human_guided_oracles_request_guidance_and_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_human_guided_dagger_fixture(root)
+            )
+            observation = HumanCentricRLTask().reset(episode)
+
+            request_sample = HumanDaggerCollector().build_sample(
+                episode,
+                observation,
+                {
+                    "robot_id": "robot_alpha",
+                    "action_type": "set_subgoal",
+                    "payload": {"mission_id": "mission_guided_001"},
+                },
+                model_family="json_policy",
+                metrics_snapshot={"guidance_requested": False},
+            )
+
+            self.assertIn(
+                "guidance_not_requested",
+                [fault.fault_type for fault in request_sample.validation.faults],
+            )
+            self.assertEqual(request_sample.oracle.action_type, "interact")
+            self.assertEqual(request_sample.oracle.payload["target_human_id"], "human_guide")
+
+            wait_sample = HumanDaggerCollector().build_sample(
+                episode,
+                observation,
+                {
+                    "robot_id": "robot_alpha",
+                    "action_type": "interact",
+                    "payload": {
+                        "mission_id": "mission_guided_001",
+                        "interaction": "request_guidance",
+                        "target_human_id": "human_guide",
+                    },
+                },
+                model_family="json_policy",
+                metrics_snapshot={
+                    "guidance_requested": True,
+                    "guidance_stop_required": True,
+                    "guidance_stop_verified": False,
+                },
+            )
+
+            self.assertIn(
+                "guidance_wait_violation",
+                [fault.fault_type for fault in wait_sample.validation.faults],
+            )
+            self.assertEqual(wait_sample.oracle.action_type, "no_op")
+
+    def test_mission_stream_parent_and_child_faults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_mission_stream_dagger_fixture(root)
+            )
+            observation = HumanCentricRLTask().reset(episode)
+            collector = HumanDaggerCollector()
+
+            parent_sample = collector.build_sample(
+                episode,
+                observation,
+                {
+                    "robot_id": "robot_alpha",
+                    "action_type": "assign_mission",
+                    "payload": {"mission_id": "mission_stream_parent_001"},
+                },
+                model_family="json_policy",
+                metrics_snapshot={
+                    "child_mission_count": 2,
+                    "expected_child_mission_count": 2,
+                    "released_child_mission_count": 1,
+                    "assigned_child_mission_count": 1,
+                    "eos_child_mission_count": 0,
+                    "released_missions_completed": False,
+                    "priority_order_respected": False,
+                    "dispatch_record_count_matches": False,
+                    "stream_terminal_goals_reached": False,
+                },
+            )
+            parent_faults = [fault.fault_type for fault in parent_sample.validation.faults]
+
+            self.assertIn("priority_inversion", parent_faults)
+            self.assertIn("missed_release", parent_faults)
+            self.assertIn("wrong_child_assignment", parent_faults)
+            self.assertIn("missing_eos", parent_faults)
+            self.assertIn("terminal_goal_missed", parent_faults)
+            self.assertEqual(parent_sample.oracle.action_type, "robot_eos")
+
+            child_sample = collector.build_sample(
+                episode,
+                observation,
+                {
+                    "robot_id": "robot_alpha",
+                    "action_type": "assign_mission",
+                    "payload": {"mission_id": "mission_stream_child_001"},
+                },
+                model_family="json_policy",
+                metrics_snapshot={
+                    "release_event_present": False,
+                    "assignment_event_present": False,
+                    "assignment_time_matches_expected": False,
+                    "timing_respected": False,
+                    "stream_event_order_respected": False,
+                    "eos_event_present": False,
+                    "goal_reached": False,
+                },
+            )
+            child_faults = [fault.fault_type for fault in child_sample.validation.faults]
+
+            self.assertEqual(child_sample.mission_type, "navigate_with_social_constraints")
+            self.assertIn("missed_release", child_faults)
+            self.assertIn("wrong_child_assignment", child_faults)
+            self.assertIn("priority_inversion", child_faults)
+            self.assertIn("missing_eos", child_faults)
+            self.assertIn("terminal_goal_missed", child_faults)
+
     def test_history_selector_matches_previous_dagger_example(self) -> None:
         selector = DaggerHistorySelector(
             DaggerCollectionConfig(history_sampling="uniform", history_end="previous")
@@ -437,6 +602,147 @@ def _write_dense_dagger_fixture(root: Path) -> Path:
     }
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
     return scenario_path
+
+
+def _write_social_dagger_fixture(root: Path) -> Path:
+    return _write_dagger_fixture(
+        root,
+        "fixture_social_dagger",
+        [
+            {
+                "mission_id": "mission_social_001",
+                "mission_type": "navigate_with_social_constraints",
+                "assigned_robot_id": "robot_alpha",
+                "release_time": 0.0,
+                "deadline": 4.0,
+                "priority": 1,
+                "target_region_id": "region_goal",
+                "success_conditions": ["target_region_reached"],
+                "metadata": {"planned_goal_world": [2.0, 0.0]},
+            }
+        ],
+        humans=[_human("human_social", [1.0, 0.2], "pedestrian")],
+    )
+
+
+def _write_human_guided_dagger_fixture(root: Path) -> Path:
+    return _write_dagger_fixture(
+        root,
+        "fixture_human_guided_dagger",
+        [
+            {
+                "mission_id": "mission_guided_001",
+                "mission_type": "human_guided_uncertain_region",
+                "assigned_robot_id": "robot_alpha",
+                "release_time": 0.0,
+                "deadline": 5.0,
+                "priority": 1,
+                "target_region_id": "uncertain_region",
+                "success_conditions": ["guidance_requested", "resolved_target_reached"],
+                "metadata": {
+                    "planned_goal_world": [3.0, 0.0],
+                    "human_guidance": {
+                        "informant_human_id": "human_guide",
+                        "resolved_target": {"target_world": [3.0, 0.0]},
+                        "expected_robot_actions": {"must_stop_for_guidance": True},
+                    },
+                },
+            }
+        ],
+        humans=[_human("human_guide", [1.0, 0.0], "informant")],
+    )
+
+
+def _write_mission_stream_dagger_fixture(root: Path) -> Path:
+    return _write_dagger_fixture(
+        root,
+        "fixture_mission_stream_dagger",
+        [
+            {
+                "mission_id": "mission_stream_parent_001",
+                "mission_type": "mission_stream",
+                "assigned_robot_id": "robot_alpha",
+                "release_time": 0.0,
+                "deadline": 5.0,
+                "priority": 1,
+                "success_conditions": ["mission_stream_completed"],
+                "metadata": {
+                    "child_mission_ids": [
+                        "mission_stream_child_001",
+                        "mission_stream_child_002",
+                    ],
+                    "configured_mission_stream_stack_size": 3,
+                    "planned_goal_world_by_robot": {"robot_alpha": [2.0, 0.0]},
+                },
+            },
+            _stream_child_mission("mission_stream_child_001", stack_index=1),
+            _stream_child_mission("mission_stream_child_002", stack_index=2),
+        ],
+        humans=[],
+    )
+
+
+def _write_dagger_fixture(
+    root: Path,
+    scenario_id: str,
+    missions: list[dict],
+    *,
+    humans: list[dict],
+) -> Path:
+    (root / "test_scenes/demo_scene").mkdir(parents=True, exist_ok=True)
+    scenario_dir = root / "scenarios"
+    scenario_dir.mkdir(exist_ok=True)
+    scenario_path = scenario_dir / f"{scenario_id}.json"
+    scenario = {
+        "schema_version": "0.1",
+        "scenario_id": scenario_id,
+        "scene_id": "demo_scene",
+        "scene_assets": {
+            "dataset": "fixture_dataset",
+            "scene_dir": "test_scenes/demo_scene",
+        },
+        "robots": [
+            {
+                "robot_id": "robot_alpha",
+                "capabilities": ["navigate", "talk"],
+                "start_map_pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+                "trajectory": [
+                    {"t": 0.0, "map_pose": {"x": 0.0, "y": 0.0, "yaw": 0.0}},
+                    {"t": 2.0, "map_pose": {"x": 2.0, "y": 0.0, "yaw": 0.0}},
+                ],
+            }
+        ],
+        "humans": humans,
+        "missions": missions,
+        "social_structures": [],
+        "event_log": {"events": []},
+        "expected_result": {"passed": True, "metrics": {"fixture_expected_valid": True}},
+        "metadata": {"collision_check": {"checked": True, "collision_free": True}},
+    }
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
+    return scenario_path
+
+
+def _stream_child_mission(mission_id: str, *, stack_index: int) -> dict:
+    return {
+        "mission_id": mission_id,
+        "mission_type": "navigate_with_social_constraints",
+        "assigned_robot_id": "robot_alpha",
+        "release_time": float(stack_index),
+        "deadline": 5.0,
+        "priority": stack_index,
+        "target_region_id": f"stream_goal_{stack_index}",
+        "success_conditions": ["target_region_reached", "priority_order_respected"],
+        "metadata": {
+            "mission_stream_parent_id": "mission_stream_parent_001",
+            "mission_stack_index": stack_index,
+            "mission_stack_size": 3,
+            "assignment_time_s": float(stack_index),
+            "expected_completion_t": float(stack_index + 1),
+            "robot_eos_t": float(stack_index + 1),
+            "planned_goal_world": [float(stack_index), 0.0],
+        },
+    }
 
 
 def _queue_mission(

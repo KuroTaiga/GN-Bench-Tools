@@ -9,6 +9,7 @@ from GN_Bench.human_eval.dagger import (
     DaggerCollectionConfig,
     DaggerHistorySelector,
     HumanDaggerCollector,
+    build_default_family_specs,
     build_default_mission_registry,
     build_default_model_adapter_registry,
     recovery_counts_from_metrics,
@@ -22,6 +23,7 @@ class HumanDaggerScaffoldTest(unittest.TestCase):
     def test_default_registries_cover_current_missions_and_model_families(self) -> None:
         mission_registry = build_default_mission_registry()
         model_registry = build_default_model_adapter_registry()
+        family_specs = build_default_family_specs()
 
         self.assertTrue(
             {
@@ -44,6 +46,12 @@ class HumanDaggerScaffoldTest(unittest.TestCase):
             "wrong_human_target",
             [entry.fault_type for entry in mission_registry["deliver_to_human"].fault_catalog],
         )
+        self.assertEqual(set(family_specs), set(mission_registry))
+        for mission_type, spec in family_specs.items():
+            catalog = mission_registry[mission_type].fault_catalog
+            catalog_faults = {entry.fault_type for entry in catalog}
+            self.assertTrue(set(spec.primary_faults) <= catalog_faults)
+            self.assertTrue(all(entry.default_recovery for entry in catalog))
 
     def test_collector_builds_trainable_wrong_human_sample(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -297,6 +305,8 @@ class HumanDaggerScaffoldTest(unittest.TestCase):
             self.assertIn("group_integrity_violation", fault_types)
             self.assertIn("queue_order_violation", fault_types)
             self.assertIn("collision_or_near_miss", fault_types)
+            self.assertEqual(sample.oracle.action_type, "set_subgoal")
+            self.assertIn("personal_space_violation", sample.oracle.payload["social_repair_faults"])
 
     def test_human_guided_oracles_request_guidance_and_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -417,6 +427,82 @@ class HumanDaggerScaffoldTest(unittest.TestCase):
             self.assertIn("priority_inversion", child_faults)
             self.assertIn("missing_eos", child_faults)
             self.assertIn("terminal_goal_missed", child_faults)
+
+    def test_dense_multi_and_combined_faults_have_recovery_oracles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            collector = HumanDaggerCollector()
+
+            multi_episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_dense_multi_dagger_fixture(root)
+            )
+            multi_observation = HumanCentricRLTask().reset(multi_episode)
+            multi_sample = collector.build_sample(
+                multi_episode,
+                multi_observation,
+                {
+                    "robot_id": "robot_alpha",
+                    "action_type": "set_subgoal",
+                    "payload": {"mission_id": "mission_dense_multi_robot_001"},
+                },
+                model_family="json_policy",
+                metrics_snapshot={
+                    "all_active_robot_goal_regions_reached": False,
+                    "no_robot_robot_collision": False,
+                    "robot_robot_collision_count": 1,
+                    "robot_robot_clearance_policy_respected": False,
+                    "robot_robot_deadlock_recovery_count": 1,
+                    "starvation_count": 1,
+                    "robot_wait_violation_count": 1,
+                    "corner_case_recovery_count": 1,
+                },
+            )
+            multi_faults = [fault.fault_type for fault in multi_sample.validation.faults]
+
+            self.assertIn("active_robot_goal_missed", multi_faults)
+            self.assertIn("robot_robot_collision", multi_faults)
+            self.assertIn("unsafe_robot_robot_clearance", multi_faults)
+            self.assertIn("deadlock", multi_faults)
+            self.assertIn("starvation", multi_faults)
+            self.assertEqual(multi_sample.oracle.action_type, "set_subgoal")
+            self.assertEqual(multi_sample.oracle.recovery["strategy"], "collision_recovery")
+
+            combined_episode = NavDPScenarioAdapter(navdp_root=root).load_episode(
+                _write_dense_combined_dagger_fixture(root)
+            )
+            combined_observation = HumanCentricRLTask().reset(combined_episode)
+            combined_sample = collector.build_sample(
+                combined_episode,
+                combined_observation,
+                {
+                    "robot_id": "robot_alpha",
+                    "action_type": "set_subgoal",
+                    "payload": {"mission_id": "mission_dense_dynamic_combined_001"},
+                },
+                model_family="json_policy",
+                metrics_snapshot={
+                    "all_active_robot_goal_regions_reached": False,
+                    "collision_count": 1,
+                    "no_robot_robot_collision": False,
+                    "robot_robot_collision_count": 1,
+                    "dense_robot_human_clearance_policy_respected": False,
+                    "robot_robot_clearance_policy_respected": False,
+                    "dense_nominal_robot_human_conflict_count": 1,
+                    "humans_keep_moving_until_robot_completion": False,
+                    "robot_robot_deadlock_recovery_count": 1,
+                    "mission_starvation_count": 1,
+                },
+            )
+            combined_faults = [fault.fault_type for fault in combined_sample.validation.faults]
+
+            self.assertIn("active_robot_goal_missed", combined_faults)
+            self.assertIn("robot_human_collision", combined_faults)
+            self.assertIn("robot_robot_collision", combined_faults)
+            self.assertIn("combined_clearance_violation", combined_faults)
+            self.assertIn("human_motion_stalled", combined_faults)
+            self.assertIn("deadlock", combined_faults)
+            self.assertIn("starvation", combined_faults)
+            self.assertEqual(combined_sample.oracle.action_type, "set_subgoal")
 
     def test_history_selector_matches_previous_dagger_example(self) -> None:
         selector = DaggerHistorySelector(
@@ -602,6 +688,61 @@ def _write_dense_dagger_fixture(root: Path) -> Path:
     }
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
     return scenario_path
+
+
+def _write_dense_multi_dagger_fixture(root: Path) -> Path:
+    return _write_dagger_fixture(
+        root,
+        "fixture_dense_multi_dagger",
+        [
+            {
+                "mission_id": "mission_dense_multi_robot_001",
+                "mission_type": "dense_multi_robot",
+                "assigned_robot_id": "robot_alpha",
+                "release_time": 0.0,
+                "deadline": 4.0,
+                "priority": 1,
+                "success_conditions": ["all_active_robot_goal_regions_reached"],
+                "metadata": {
+                    "active_robot_ids": ["robot_alpha", "robot_beta"],
+                    "planned_goal_world_by_robot": {
+                        "robot_alpha": [2.0, 0.0],
+                        "robot_beta": [2.0, 1.0],
+                    },
+                    "minimum_robot_robot_distance_m": 0.6,
+                },
+            }
+        ],
+        humans=[],
+    )
+
+
+def _write_dense_combined_dagger_fixture(root: Path) -> Path:
+    return _write_dagger_fixture(
+        root,
+        "fixture_dense_combined_dagger",
+        [
+            {
+                "mission_id": "mission_dense_dynamic_combined_001",
+                "mission_type": "dense_dynamic_combined",
+                "assigned_robot_id": "robot_alpha",
+                "release_time": 0.0,
+                "deadline": 4.0,
+                "priority": 1,
+                "success_conditions": ["all_active_robot_goal_regions_reached"],
+                "metadata": {
+                    "active_robot_ids": ["robot_alpha", "robot_beta"],
+                    "planned_goal_world_by_robot": {
+                        "robot_alpha": [2.0, 0.0],
+                        "robot_beta": [2.0, 1.0],
+                    },
+                    "minimum_robot_robot_distance_m": 0.6,
+                    "minimum_moving_robot_human_distance_m": 0.8,
+                },
+            }
+        ],
+        humans=[_human("human_dense", [1.0, 0.2], "moving_pedestrian")],
+    )
 
 
 def _write_social_dagger_fixture(root: Path) -> Path:

@@ -107,11 +107,11 @@ class MissionDaggerHandler:
 class DeliverToHumanDaggerHandler(MissionDaggerHandler):
     mission_type = "deliver_to_human"
     fault_catalog = (
-        FaultCatalogEntry("missing_human_target", "Model action omitted the human target."),
-        FaultCatalogEntry("wrong_human_target", "Model selected a non-target human."),
-        FaultCatalogEntry("target_ambiguity_unhandled", "Model failed to disambiguate similar humans."),
-        FaultCatalogEntry("unsafe_human_approach", "Model entered unsafe personal/contact space."),
-        FaultCatalogEntry("early_or_late_stop", "Model stopped before contact or after deadline."),
+        FaultCatalogEntry("missing_human_target", "Model action omitted the human target.", "assign_target_human", "failure"),
+        FaultCatalogEntry("wrong_human_target", "Model selected a non-target human.", "assign_target_human", "failure"),
+        FaultCatalogEntry("target_ambiguity_unhandled", "Model failed to disambiguate similar humans.", "increase_identity_evidence", "diagnostic"),
+        FaultCatalogEntry("unsafe_human_approach", "Model entered unsafe personal/contact space.", "safe_reposition", "failure"),
+        FaultCatalogEntry("early_or_late_stop", "Model stopped before contact or after deadline.", "resume_or_stop_at_target", "failure"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -183,11 +183,11 @@ class DeliverToHumanDaggerHandler(MissionDaggerHandler):
 class ServeQueueDaggerHandler(MissionDaggerHandler):
     mission_type = "serve_queue"
     fault_catalog = (
-        FaultCatalogEntry("missing_queue_member", "Model action omitted the queue participant."),
-        FaultCatalogEntry("wrong_queue_member", "Model selected the wrong queue participant."),
-        FaultCatalogEntry("queue_order_violation", "Model attempted service before previous members."),
-        FaultCatalogEntry("queue_cutting", "Model approached an unlawful service point."),
-        FaultCatalogEntry("wait_required", "Model should wait for prior queue completion."),
+        FaultCatalogEntry("missing_queue_member", "Model action omitted the queue participant.", "assign_queue_member", "failure"),
+        FaultCatalogEntry("wrong_queue_member", "Model selected the wrong queue participant.", "assign_queue_member", "failure"),
+        FaultCatalogEntry("queue_order_violation", "Model attempted service before previous members.", "wait_for_previous_member", "failure"),
+        FaultCatalogEntry("queue_cutting", "Model approached an unlawful service point.", "move_to_queue_tail", "failure"),
+        FaultCatalogEntry("wait_required", "Model should wait for prior queue completion.", "no_op_until_previous_complete", "failure"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -270,12 +270,12 @@ class ServeQueueDaggerHandler(MissionDaggerHandler):
 class NavigateWithSocialConstraintsDaggerHandler(MissionDaggerHandler):
     mission_type = "navigate_with_social_constraints"
     fault_catalog = (
-        FaultCatalogEntry("goal_not_reached", "Model did not reach the social navigation goal."),
-        FaultCatalogEntry("personal_space_violation", "Model violates L1 personal-space rules."),
-        FaultCatalogEntry("pedestrian_yield_failure", "Model violates L2 yield timing."),
-        FaultCatalogEntry("group_integrity_violation", "Model crosses an L3 protected group region."),
-        FaultCatalogEntry("queue_order_violation", "Model violates L4 queue-order constraints."),
-        FaultCatalogEntry("collision_or_near_miss", "Model collides or enters unsafe clearance."),
+        FaultCatalogEntry("goal_not_reached", "Model did not reach the social navigation goal.", "set_socially_valid_subgoal", "failure"),
+        FaultCatalogEntry("personal_space_violation", "Model violates L1 personal-space rules.", "safe_reposition", "failure"),
+        FaultCatalogEntry("pedestrian_yield_failure", "Model violates L2 yield timing.", "yield_or_retime_path", "failure"),
+        FaultCatalogEntry("group_integrity_violation", "Model crosses an L3 protected group region.", "route_around_group", "failure"),
+        FaultCatalogEntry("queue_order_violation", "Model violates L4 queue-order constraints.", "move_to_queue_tail", "failure"),
+        FaultCatalogEntry("collision_or_near_miss", "Model collides or enters unsafe clearance.", "collision_recovery", "failure"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -390,14 +390,35 @@ class NavigateWithSocialConstraintsDaggerHandler(MissionDaggerHandler):
             )
         return faults
 
+    def oracle_correction(
+        self,
+        context: MissionDaggerContext,
+        validation: DaggerValidationResult,
+    ) -> DaggerOracleCorrection:
+        payload = _oracle_assignment_payload(context)
+        payload["active_social_law_ids"] = _string_list(
+            context.metrics_snapshot.get("active_social_law_ids")
+        )
+        payload["social_repair_faults"] = [
+            fault.fault_type for fault in validation.faults
+        ]
+        return DaggerOracleCorrection(
+            oracle_intent="social_navigation_repair",
+            action_type="set_subgoal",
+            payload=payload,
+            recovery=_oracle_recovery(context, validation),
+            source=f"{type(self).__name__}.oracle_correction",
+            trainable=bool(validation.faults),
+        )
+
 
 class HumanGuidedUncertainRegionDaggerHandler(MissionDaggerHandler):
     mission_type = "human_guided_uncertain_region"
     fault_catalog = (
-        FaultCatalogEntry("guidance_not_requested", "Model moves through uncertainty without asking."),
-        FaultCatalogEntry("wrong_informant", "Model asks the wrong human for guidance."),
-        FaultCatalogEntry("guidance_wait_violation", "Model does not stop while waiting."),
-        FaultCatalogEntry("resolved_target_ignored", "Model ignores the clarified target."),
+        FaultCatalogEntry("guidance_not_requested", "Model moves through uncertainty without asking.", "request_human_guidance", "failure"),
+        FaultCatalogEntry("wrong_informant", "Model asks the wrong human for guidance.", "request_correct_informant", "failure"),
+        FaultCatalogEntry("guidance_wait_violation", "Model does not stop while waiting.", "no_op_until_guidance_response", "failure"),
+        FaultCatalogEntry("resolved_target_ignored", "Model ignores the clarified target.", "set_resolved_target_subgoal", "failure"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -503,11 +524,11 @@ class HumanGuidedUncertainRegionDaggerHandler(MissionDaggerHandler):
 class MissionStreamDaggerHandler(MissionDaggerHandler):
     mission_type = "mission_stream"
     fault_catalog = (
-        FaultCatalogEntry("priority_inversion", "Model dispatches child missions out of priority order."),
-        FaultCatalogEntry("missed_release", "Model ignores a released child mission."),
-        FaultCatalogEntry("wrong_child_assignment", "Model assigns the wrong robot or child mission."),
-        FaultCatalogEntry("missing_eos", "Model completes a child mission without end-of-sequence closeout."),
-        FaultCatalogEntry("terminal_goal_missed", "Mission stream terminal goal was not reached."),
+        FaultCatalogEntry("priority_inversion", "Model dispatches child missions out of priority order.", "dispatch_highest_priority_child", "failure"),
+        FaultCatalogEntry("missed_release", "Model ignores a released child mission.", "assign_released_child", "failure"),
+        FaultCatalogEntry("wrong_child_assignment", "Model assigns the wrong robot or child mission.", "assign_correct_child", "failure"),
+        FaultCatalogEntry("missing_eos", "Model completes a child mission without end-of-sequence closeout.", "emit_robot_eos", "failure"),
+        FaultCatalogEntry("terminal_goal_missed", "Mission stream terminal goal was not reached.", "set_terminal_goal_subgoal", "failure"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -635,11 +656,13 @@ class MissionStreamDaggerHandler(MissionDaggerHandler):
 class DenseDynamicHumansDaggerHandler(MissionDaggerHandler):
     mission_type = "dense_dynamic_humans"
     fault_catalog = (
-        FaultCatalogEntry("robot_human_collision", "Model collides with a moving human."),
-        FaultCatalogEntry("unsafe_robot_human_clearance", "Model violates required robot-human clearance."),
-        FaultCatalogEntry("stuck_robot", "Robot makes no progress while a path remains available."),
-        FaultCatalogEntry("unnecessary_freeze", "Robot waits without a blocking human."),
-        FaultCatalogEntry("recovery_required", "Rollout requires local replan or safe reposition."),
+        FaultCatalogEntry("active_robot_goal_missed", "One or more active robots did not reach their goal.", "set_active_robot_subgoals", "failure"),
+        FaultCatalogEntry("robot_human_collision", "Model collides with a moving human.", "collision_recovery", "failure"),
+        FaultCatalogEntry("unsafe_robot_human_clearance", "Model violates required robot-human clearance.", "safe_reposition", "failure"),
+        FaultCatalogEntry("human_motion_stalled", "Moving humans stop before robot completion.", "repair_dynamic_human_schedule", "diagnostic"),
+        FaultCatalogEntry("stuck_robot", "Robot makes no progress while a path remains available.", "stuck_recovery", "failure"),
+        FaultCatalogEntry("unnecessary_freeze", "Robot waits without a blocking human.", "resume_motion_or_replan", "failure"),
+        FaultCatalogEntry("recovery_required", "Rollout requires local replan or safe reposition.", "record_recovery_counts", "diagnostic"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -678,15 +701,25 @@ class DenseDynamicHumansDaggerHandler(MissionDaggerHandler):
             )
         return faults
 
+    def oracle_correction(
+        self,
+        context: MissionDaggerContext,
+        validation: DaggerValidationResult,
+    ) -> DaggerOracleCorrection:
+        return _dense_oracle_correction(self, context, validation)
+
 
 class DenseMultiRobotDaggerHandler(MissionDaggerHandler):
     mission_type = "dense_multi_robot"
     fault_catalog = (
-        FaultCatalogEntry("robot_robot_collision", "Model collides with another robot."),
-        FaultCatalogEntry("unsafe_robot_robot_clearance", "Model violates robot-robot spacing."),
-        FaultCatalogEntry("deadlock", "Robots block each other without progress."),
-        FaultCatalogEntry("starvation", "One robot or mission is repeatedly deferred."),
-        FaultCatalogEntry("recovery_required", "Rollout requires deadlock or safe-reposition recovery."),
+        FaultCatalogEntry("active_robot_goal_missed", "One or more active robots did not reach their goal.", "set_active_robot_subgoals", "failure"),
+        FaultCatalogEntry("robot_robot_collision", "Model collides with another robot.", "collision_recovery", "failure"),
+        FaultCatalogEntry("unsafe_robot_robot_clearance", "Model violates robot-robot spacing.", "safe_reposition", "failure"),
+        FaultCatalogEntry("deadlock", "Robots block each other without progress.", "stuck_recovery", "failure"),
+        FaultCatalogEntry("starvation", "One robot or mission is repeatedly deferred.", "rebalance_robot_priorities", "failure"),
+        FaultCatalogEntry("stuck_robot", "Robot makes no progress while a path remains available.", "stuck_recovery", "failure"),
+        FaultCatalogEntry("unnecessary_freeze", "Robot waits without a blocking robot.", "resume_motion_or_replan", "failure"),
+        FaultCatalogEntry("recovery_required", "Rollout requires deadlock or safe-reposition recovery.", "record_recovery_counts", "diagnostic"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -731,17 +764,48 @@ class DenseMultiRobotDaggerHandler(MissionDaggerHandler):
                     },
                 )
             )
+        if _metric_positive(metrics, "starvation_count") or _metric_positive(
+            metrics,
+            "mission_starvation_count",
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="starvation",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "starvation_count": int(
+                            _number(metrics.get("starvation_count"), 0.0)
+                        ),
+                        "mission_starvation_count": int(
+                            _number(metrics.get("mission_starvation_count"), 0.0)
+                        ),
+                    },
+                )
+            )
         return faults
+
+    def oracle_correction(
+        self,
+        context: MissionDaggerContext,
+        validation: DaggerValidationResult,
+    ) -> DaggerOracleCorrection:
+        return _dense_oracle_correction(self, context, validation)
 
 
 class DenseDynamicCombinedDaggerHandler(MissionDaggerHandler):
     mission_type = "dense_dynamic_combined"
     fault_catalog = (
-        FaultCatalogEntry("robot_human_collision", "Model collides with a moving human."),
-        FaultCatalogEntry("robot_robot_collision", "Model collides with another robot."),
-        FaultCatalogEntry("combined_clearance_violation", "Model violates human or robot clearance."),
-        FaultCatalogEntry("deadlock", "Robots block each other in a dense human scene."),
-        FaultCatalogEntry("recovery_required", "Rollout requires human or robot recovery intervention."),
+        FaultCatalogEntry("active_robot_goal_missed", "One or more active robots did not reach their goal.", "set_active_robot_subgoals", "failure"),
+        FaultCatalogEntry("robot_human_collision", "Model collides with a moving human.", "collision_recovery", "failure"),
+        FaultCatalogEntry("robot_robot_collision", "Model collides with another robot.", "collision_recovery", "failure"),
+        FaultCatalogEntry("combined_clearance_violation", "Model violates human or robot clearance.", "safe_reposition", "failure"),
+        FaultCatalogEntry("human_motion_stalled", "Moving humans stop before robot completion.", "repair_dynamic_human_schedule", "diagnostic"),
+        FaultCatalogEntry("deadlock", "Robots block each other in a dense human scene.", "stuck_recovery", "failure"),
+        FaultCatalogEntry("starvation", "One robot or mission is repeatedly deferred.", "rebalance_robot_priorities", "failure"),
+        FaultCatalogEntry("stuck_robot", "Robot makes no progress while a path remains available.", "stuck_recovery", "failure"),
+        FaultCatalogEntry("unnecessary_freeze", "Robot waits without a blocking human or robot.", "resume_motion_or_replan", "failure"),
+        FaultCatalogEntry("recovery_required", "Rollout requires human or robot recovery intervention.", "record_recovery_counts", "diagnostic"),
     )
 
     def _mission_faults(self, context: MissionDaggerContext) -> list[DaggerFault]:
@@ -812,7 +876,33 @@ class DenseDynamicCombinedDaggerHandler(MissionDaggerHandler):
                     },
                 )
             )
+        if _metric_positive(metrics, "starvation_count") or _metric_positive(
+            metrics,
+            "mission_starvation_count",
+        ):
+            faults.append(
+                DaggerFault(
+                    fault_type="starvation",
+                    mission_id=context.mission_id,
+                    severity="failure",
+                    details={
+                        "starvation_count": int(
+                            _number(metrics.get("starvation_count"), 0.0)
+                        ),
+                        "mission_starvation_count": int(
+                            _number(metrics.get("mission_starvation_count"), 0.0)
+                        ),
+                    },
+                )
+            )
         return faults
+
+    def oracle_correction(
+        self,
+        context: MissionDaggerContext,
+        validation: DaggerValidationResult,
+    ) -> DaggerOracleCorrection:
+        return _dense_oracle_correction(self, context, validation)
 
 
 def build_default_mission_registry() -> dict[str, MissionDaggerHandler]:
@@ -1102,6 +1192,34 @@ def _mission_stream_child_faults(context: MissionDaggerContext) -> list[DaggerFa
 def _dense_common_faults(context: MissionDaggerContext) -> list[DaggerFault]:
     metrics = context.metrics_snapshot
     faults: list[DaggerFault] = []
+    if metrics.get("all_active_robot_goal_regions_reached") is False:
+        faults.append(
+            DaggerFault(
+                fault_type="active_robot_goal_missed",
+                mission_id=context.mission_id,
+                severity="failure",
+                details={
+                    "active_robot_goal_checks": metrics.get(
+                        "active_robot_goal_checks",
+                        [],
+                    )
+                },
+            )
+        )
+    if metrics.get("humans_keep_moving_until_robot_completion") is False:
+        faults.append(
+            DaggerFault(
+                fault_type="human_motion_stalled",
+                mission_id=context.mission_id,
+                severity="diagnostic",
+                details={
+                    "dense_human_activity_checks": metrics.get(
+                        "dense_human_activity_checks",
+                        [],
+                    )
+                },
+            )
+        )
     if _metric_positive(metrics, "robot_stalled_recovery_count") or _metric_positive(
         metrics,
         "stuck_recovery_count",
@@ -1150,6 +1268,30 @@ def _dense_common_faults(context: MissionDaggerContext) -> list[DaggerFault]:
             )
         )
     return faults
+
+
+def _dense_oracle_correction(
+    handler: MissionDaggerHandler,
+    context: MissionDaggerContext,
+    validation: DaggerValidationResult,
+) -> DaggerOracleCorrection:
+    payload = _oracle_assignment_payload(context)
+    metadata = _dict_value(context.mission.get("metadata"))
+    payload["active_robot_ids"] = _string_list(metadata.get("active_robot_ids"))
+    payload["subgoals_by_robot"] = _dict_value(metadata.get("planned_goal_world_by_robot"))
+    if not payload["subgoals_by_robot"] and "subgoal" in payload:
+        assigned_robot_id = str(context.mission.get("assigned_robot_id", ""))
+        if assigned_robot_id:
+            payload["subgoals_by_robot"] = {assigned_robot_id: payload["subgoal"]}
+    payload["dense_repair_faults"] = [fault.fault_type for fault in validation.faults]
+    return DaggerOracleCorrection(
+        oracle_intent=f"{context.mission_type}_repair",
+        action_type="set_subgoal",
+        payload=payload,
+        recovery=_oracle_recovery(context, validation),
+        source=f"{type(handler).__name__}.oracle_correction",
+        trainable=bool(validation.faults),
+    )
 
 
 def _oracle_assignment_payload(context: MissionDaggerContext) -> JsonDict:

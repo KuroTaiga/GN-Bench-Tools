@@ -254,6 +254,53 @@ class NoHumanAwarenessPolicy(BaseHumanCentricPolicy):
         )
 
 
+class HumanAwareGreedyPolicy(BaseHumanCentricPolicy):
+    """Greedy assignment with a straight-line human-clearance penalty."""
+
+    policy_name = "human_aware_greedy"
+
+    def act(self, observation: JsonDict) -> BaselineAction:
+        missions = self._available_missions(observation)
+        robots = self._available_robots(observation)
+        choices: list[tuple[float, _MissionChoice]] = []
+        for mission in missions:
+            target = _mission_target_pose(self.scenario, mission)
+            for robot in self._available_robots(observation, mission):
+                distance = _distance(_robot_pose(robot), target)
+                penalty = _human_clearance_penalty(self.scenario, robot, mission)
+                choices.append(
+                    (
+                        distance + penalty,
+                        _MissionChoice(mission=mission, robot=robot, distance=distance),
+                    )
+                )
+        if not choices:
+            return self._no_op("no_reachable_pair")
+        _, choice = min(
+            choices,
+            key=lambda item: (
+                item[0],
+                item[1].distance,
+                _number(item[1].mission.get("deadline"), float("inf")),
+                str(item[1].mission.get("mission_id", "")),
+                str(item[1].robot.get("robot_id", "")),
+            ),
+        )
+        return self._assignment_action(
+            choice.robot,
+            choice.mission,
+            route_mode="human_aware_greedy",
+            avoid_current_human_occupancy=True,
+            avoid_personal_space=True,
+            estimated_distance=choice.distance,
+            human_clearance_penalty=_human_clearance_penalty(
+                self.scenario,
+                choice.robot,
+                choice.mission,
+            ),
+        )
+
+
 class SingleRobotSerialPolicy(BaseHumanCentricPolicy):
     """Use one robot to execute all missions in release order."""
 
@@ -346,6 +393,68 @@ def _mission_target_pose(scenario: JsonDict, mission: JsonDict) -> tuple[float, 
 
 def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _human_clearance_penalty(
+    scenario: JsonDict,
+    robot: JsonDict,
+    mission: JsonDict,
+) -> float:
+    start = _robot_pose(robot)
+    goal = _mission_target_pose(scenario, mission)
+    target_human_id = str(mission.get("target_human_id", ""))
+    penalty = 0.0
+    for human in scenario.get("humans", []):
+        if not isinstance(human, dict):
+            continue
+        human_id = str(human.get("human_id", ""))
+        if human_id and human_id == target_human_id:
+            continue
+        human_xy = _human_current_pose(human)
+        radius = _human_personal_space_radius(human)
+        clearance = _point_to_segment_distance(human_xy, start, goal)
+        if clearance < radius:
+            penalty += (radius - clearance) * 10.0
+    return penalty
+
+
+def _human_current_pose(human: JsonDict) -> tuple[float, float]:
+    trajectory = human.get("trajectory")
+    if isinstance(trajectory, list) and trajectory:
+        last_point = max(
+            (point for point in trajectory if isinstance(point, dict)),
+            key=lambda point: _number(point.get("t"), 0.0),
+            default=None,
+        )
+        if last_point is not None:
+            return _pose_from_mapping(last_point.get("map_pose"))
+    return _pose_from_mapping(human.get("start_map_pose"))
+
+
+def _human_personal_space_radius(human: JsonDict) -> float:
+    social_defaults = human.get("social_defaults", {})
+    if isinstance(social_defaults, dict):
+        value = social_defaults.get("personal_space_radius")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return 0.8
+
+
+def _point_to_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    vx = end[0] - start[0]
+    vy = end[1] - start[1]
+    wx = point[0] - start[0]
+    wy = point[1] - start[1]
+    denominator = vx * vx + vy * vy
+    if denominator == 0.0:
+        return _distance(point, start)
+    ratio = max(0.0, min(1.0, (wx * vx + wy * vy) / denominator))
+    closest = (start[0] + ratio * vx, start[1] + ratio * vy)
+    return _distance(point, closest)
 
 
 def _find_robot(robots: list[JsonDict], robot_id: str) -> JsonDict | None:

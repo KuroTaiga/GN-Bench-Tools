@@ -2,6 +2,7 @@
 
 from .policies import (
     GreedyNearestPolicy,
+    HumanAwareGreedyPolicy,
     NoHumanAwarenessPolicy,
     OracleHumanCentricPolicy,
     PriorityGreedyPolicy,
@@ -10,6 +11,7 @@ from .policies import (
 
 __all__ = [
     "GreedyNearestPolicy",
+    "HumanAwareGreedyPolicy",
     "NoHumanAwarenessPolicy",
     "OracleHumanCentricPolicy",
     "PriorityGreedyPolicy",

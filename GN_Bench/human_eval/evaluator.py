@@ -135,6 +135,18 @@ class HumanCentricEvaluator:
             "min_clearance_m": collision_check.get("min_clearance_m"),
         }
         metrics.update(family_metrics)
+        metrics.update(
+            _publication_metrics(
+                payload=payload,
+                missions=missions,
+                robots=robots,
+                humans=humans,
+                events=events,
+                mission_results=mission_results,
+                episode_success=success,
+                base_metrics=metrics,
+            )
+        )
 
         return ReplayResult(
             episode_id=episode.episode_id,
@@ -225,6 +237,8 @@ def _evaluate_event_log_mission(mission: JsonDict, events: list[JsonDict]) -> Js
         "mission_type": mission.get("mission_type", ""),
         "success": completion_time is not None,
         "completion_time_s": completion_time,
+        "navigation_error_m": None,
+        "path_length_m": None,
         "evidence": "event_log_completion" if completion_time is not None else "event_log_incomplete",
     }
 
@@ -253,6 +267,7 @@ def _evaluate_deliver_to_human(
 
     contact_threshold_m = _contact_threshold_m(payload, mission)
     contact_time, target_min_distance = _first_contact_time(robot, target_human, contact_threshold_m)
+    navigation_error = _terminal_robot_to_human_distance(robot, target_human)
     deadline = _deadline_s(mission)
     completion_time = _mission_event_time(events, mission_id, {"completion", "mission_completion"})
     terminal_time = contact_time if contact_time is not None else completion_time
@@ -291,6 +306,8 @@ def _evaluate_deliver_to_human(
         "target_contact_time_s": contact_time,
         "completion_time_s": completion_time,
         "deadline_s": deadline,
+        "navigation_error_m": navigation_error,
+        "path_length_m": _actor_path_distance(robot),
         "target_min_distance_m": target_min_distance,
         "correct_human_reached": correct_human_reached,
         "object_delivered": object_delivered,
@@ -351,6 +368,7 @@ def _evaluate_social_navigation(
         goal_xy,
         goal_threshold_m,
     )
+    navigation_error = _terminal_goal_distance(robot, goal_xy)
     deadline = _deadline_s(mission)
     completion_time = _mission_event_time(events, mission_id, {"completion", "mission_completion"})
     terminal_time = goal_reach_time if goal_reach_time is not None else completion_time
@@ -385,6 +403,8 @@ def _evaluate_social_navigation(
         "goal_reach_time_s": goal_reach_time,
         "completion_time_s": completion_time,
         "deadline_s": deadline,
+        "navigation_error_m": navigation_error,
+        "path_length_m": _actor_path_distance(robot),
         "minimum_goal_distance_m": min_goal_distance,
         "goal_reached": goal_reached,
         "deadline_success": deadline_success,
@@ -424,6 +444,7 @@ def _evaluate_human_guided_uncertain_region(
         resolved_target_xy,
         goal_threshold_m,
     )
+    navigation_error = _terminal_goal_distance(robot, resolved_target_xy)
     deadline = _deadline_s(mission)
     terminal_time = goal_reach_time if goal_reach_time is not None else completion_time
     deadline_success = (
@@ -463,6 +484,8 @@ def _evaluate_human_guided_uncertain_region(
         "completion_time_s": completion_time,
         "goal_reach_time_s": goal_reach_time,
         "deadline_s": deadline,
+        "navigation_error_m": navigation_error,
+        "path_length_m": _actor_path_distance(robot),
         "minimum_goal_distance_m": min_goal_distance,
         "guidance_requested": guidance_requested,
         "human_guidance_received": guidance_received,
@@ -509,6 +532,7 @@ def _evaluate_serve_queue(
         start_time=release_time,
         end_time=deadline,
     )
+    navigation_error = _terminal_robot_to_human_distance(robot, target_human)
     completion_time = _mission_event_time(events, mission_id, {"completion", "mission_completion"})
     terminal_time = contact_time if contact_time is not None else completion_time
     deadline_success = (
@@ -552,6 +576,8 @@ def _evaluate_serve_queue(
         "completion_time_s": completion_time,
         "release_time_s": release_time,
         "deadline_s": deadline,
+        "navigation_error_m": navigation_error,
+        "path_length_m": _actor_path_distance(robot),
         "target_min_distance_m": target_min_distance,
         "correct_human_reached": correct_human_reached,
         "nearest_queue_contact_reached": nearest_queue_contact_reached,
@@ -602,6 +628,10 @@ def _evaluate_mission_stream_parent(
     )
     terminal_goal_metrics = _stream_parent_terminal_goal_metrics(metadata, robots)
     terminal_goals_reached = terminal_goal_metrics["stream_terminal_goals_reached"]
+    terminal_goal_robot_ids = [
+        str(robot_id)
+        for robot_id in _dict_value(metadata.get("planned_goal_world_by_robot")).keys()
+    ]
     parent_completion_time = _mission_event_time(
         events,
         mission_id,
@@ -665,6 +695,8 @@ def _evaluate_mission_stream_parent(
         "expected_completion_time_s": expected_completion_time,
         "parent_completion_matches_expected": parent_completion_matches_expected,
         "deadline_s": deadline,
+        "navigation_error_m": terminal_goal_metrics["stream_terminal_goal_max_distance_m"],
+        "path_length_m": _robots_path_distance(robots, terminal_goal_robot_ids),
         "deadline_success": deadline_success,
         "released_missions_completed": released_missions_completed,
         "priority_order_respected": priority_order_respected,
@@ -708,6 +740,7 @@ def _evaluate_mission_stream_child(
         start_time=release_time,
         end_time=deadline,
     )
+    navigation_error = _terminal_goal_distance(robot, goal_xy)
     timing_check = _mission_stream_child_timing_check(mission, events)
     completion_time = timing_check["completion_time_s"]
     terminal_time = completion_time if completion_time is not None else goal_reach_time
@@ -745,6 +778,8 @@ def _evaluate_mission_stream_child(
         "goal_reached": goal_reached,
         "release_time_s": release_time,
         "deadline_s": deadline,
+        "navigation_error_m": navigation_error,
+        "path_length_m": _actor_path_distance(robot),
         "deadline_success": deadline_success,
         "collision_count": collision_count,
         "priority_order_respected": timing_check["timing_respected"],
@@ -809,6 +844,10 @@ def _evaluate_dense_dynamic_humans(
         "all_active_robot_goal_regions_reached": all_goals_reached,
         "completion_time_s": completion_time,
         "deadline_s": deadline,
+        "navigation_error_m": _max_optional(
+            check.get("terminal_goal_distance_m") for check in goal_checks
+        ),
+        "path_length_m": _robots_path_distance(robots, active_robot_ids),
         "deadline_success": deadline_success,
         "collision_count": collision_count,
         "dense_nominal_robot_human_conflict_count": nominal_conflict_count,
@@ -876,6 +915,10 @@ def _evaluate_dense_multi_robot(
         "all_active_robot_goal_regions_reached": all_goals_reached,
         "completion_time_s": completion_time,
         "deadline_s": deadline,
+        "navigation_error_m": _max_optional(
+            check.get("terminal_goal_distance_m") for check in goal_checks
+        ),
+        "path_length_m": _robots_path_distance(robots, active_robot_ids),
         "deadline_success": deadline_success,
         "collision_count": collision_count,
         **robot_robot_clearance,
@@ -951,6 +994,10 @@ def _evaluate_dense_dynamic_combined(
         "all_active_robot_goal_regions_reached": all_goals_reached,
         "completion_time_s": completion_time,
         "deadline_s": deadline,
+        "navigation_error_m": _max_optional(
+            check.get("terminal_goal_distance_m") for check in goal_checks
+        ),
+        "path_length_m": _robots_path_distance(robots, active_robot_ids),
         "deadline_success": deadline_success,
         "collision_count": collision_count,
         "dense_nominal_robot_human_conflict_count": nominal_conflict_count,
@@ -1385,6 +1432,338 @@ def _summarize_mission_results(mission_results: list[JsonDict]) -> JsonDict:
             }
         )
     return metrics
+
+
+def _publication_metrics(
+    *,
+    payload: JsonDict,
+    missions: list[JsonDict],
+    robots: list[JsonDict],
+    humans: list[JsonDict],
+    events: list[JsonDict],
+    mission_results: list[JsonDict],
+    episode_success: bool | None,
+    base_metrics: JsonDict,
+) -> JsonDict:
+    """Build the canonical publication metric layer from replay outputs."""
+
+    mission_count = len(missions)
+    success_values = _bool_values(result.get("success") for result in mission_results)
+    mission_success_rate = _rate(success_values)
+    if mission_success_rate is None and episode_success is not None:
+        mission_success_rate = 1.0 if episode_success else 0.0
+
+    completion_rate = _optional_number(base_metrics.get("completion_rate"))
+    if completion_rate is None:
+        completion_rate = mission_success_rate
+
+    navigation_errors = [
+        result.get("navigation_error_m")
+        for result in mission_results
+        if result.get("navigation_error_m") is not None
+    ]
+    path_lengths = [
+        result.get("path_length_m")
+        for result in mission_results
+        if result.get("path_length_m") is not None
+    ]
+    total_collision_count = sum(_mission_collision_count(result) for result in mission_results)
+    deadline_values = [
+        result.get("deadline_success")
+        for result in mission_results
+        if result.get("deadline_s") is not None
+        or _mission_by_id(missions, str(result.get("mission_id", ""))).get("deadline") is not None
+    ]
+    deadline_bool_values = _bool_values(deadline_values)
+
+    queue_checks, queue_violations = _queue_order_counts(mission_results)
+    yield_checks, yield_violations = _metric_check_counts(
+        mission_results,
+        check_count_key="pedestrian_yield_check_count",
+        violation_count_key="pedestrian_yield_violation_count",
+        fallback_success_key="pedestrian_yield_respected",
+    )
+    group_checks, group_violations = _metric_check_counts(
+        mission_results,
+        check_count_key="group_integrity_check_count",
+        violation_count_key="group_region_violation_count",
+        fallback_success_key="group_integrity_respected",
+    )
+    correct_human_values = _bool_values(
+        result.get("correct_human_reached")
+        for result in mission_results
+        if result.get("target_human_id")
+    )
+
+    completed_count = int(_number(base_metrics.get("completed_mission_count"), 0.0))
+    if completed_count == 0 and success_values:
+        completed_count = sum(1 for value in success_values if value)
+    duration_s = _number(base_metrics.get("duration_s"), 0.0)
+    is_multi_robot = len(robots) > 1 or any(
+        len(_string_list(result.get("active_robot_ids"))) > 1 for result in mission_results
+    )
+
+    metrics: JsonDict = {
+        "metric_schema_version": "human_publication_metrics_v0.2",
+        "metric_source": "trajectory_event_log_replay",
+        "navigation_error_m": _mean_optional(navigation_errors),
+        "path_length_m": _mean_optional(path_lengths),
+        "success_rate": mission_success_rate,
+        "collision_rate": 1.0 if total_collision_count > 0 else 0.0,
+        "mission_collision_rate": _rate(
+            [bool(_mission_collision_count(result)) for result in mission_results]
+        ),
+        "total_collision_count": total_collision_count,
+        "total_collision_rate": (
+            total_collision_count / mission_count if mission_count else None
+        ),
+        "mission_completion_rate": completion_rate,
+        "mission_completion_count": completed_count,
+        "weighted_mission_score": _weighted_mission_score(missions, mission_results),
+        "deadline_miss_rate": _miss_rate(deadline_bool_values),
+        "queue_order_violation_rate": (
+            queue_violations / queue_checks if queue_checks else None
+        ),
+        "personal_space_violation_s": sum(
+            float(_number(result.get("personal_space_violation_duration_s"), 0.0))
+            for result in mission_results
+        ),
+        "pedestrian_yield_violation_rate": (
+            yield_violations / yield_checks if yield_checks else None
+        ),
+        "group_integrity_violation_rate": (
+            group_violations / group_checks if group_checks else None
+        ),
+        "correct_human_fulfillment_rate": _rate(correct_human_values),
+        "multi_robot_throughput": (
+            completed_count / duration_s if is_multi_robot and duration_s > 0.0 else None
+        ),
+        "handoff_success_rate": _handoff_success_rate(missions, events),
+        "cancellation_compliance_rate": _cancellation_compliance_rate(events),
+        "publication_variants": _publication_variants(payload, missions, humans),
+    }
+    metrics["metric_groups"] = {
+        "navigation": [
+            "navigation_error_m",
+            "path_length_m",
+            "success_rate",
+            "collision_rate",
+            "total_collision_rate",
+        ],
+        "mission": [
+            "mission_completion_rate",
+            "weighted_mission_score",
+            "deadline_miss_rate",
+            "correct_human_fulfillment_rate",
+        ],
+        "human_safety": [
+            "collision_rate",
+            "total_collision_count",
+            "personal_space_violation_s",
+        ],
+        "social_laws": [
+            "queue_order_violation_rate",
+            "pedestrian_yield_violation_rate",
+            "group_integrity_violation_rate",
+        ],
+        "coordination": [
+            "multi_robot_throughput",
+            "handoff_success_rate",
+            "cancellation_compliance_rate",
+        ],
+    }
+    return metrics
+
+
+def _bool_values(values: Any) -> list[bool]:
+    return [value for value in values if isinstance(value, bool)]
+
+
+def _rate(values: list[bool]) -> float | None:
+    return sum(1 for value in values if value) / len(values) if values else None
+
+
+def _miss_rate(values: list[bool]) -> float | None:
+    return sum(1 for value in values if not value) / len(values) if values else None
+
+
+def _mission_by_id(missions: list[JsonDict], mission_id: str) -> JsonDict:
+    for mission in missions:
+        if str(mission.get("mission_id", "")) == mission_id:
+            return mission
+    return {}
+
+
+def _mission_collision_count(result: JsonDict) -> int:
+    count = int(_number(result.get("collision_count"), 0.0))
+    if count == 0:
+        count += int(_number(result.get("wrong_human_contact_count"), 0.0))
+    robot_robot_count = int(_number(result.get("robot_robot_collision_count"), 0.0))
+    if result.get("mission_type") == "dense_dynamic_combined":
+        count += robot_robot_count
+    else:
+        count = max(count, robot_robot_count)
+    return count
+
+
+def _queue_order_counts(mission_results: list[JsonDict]) -> tuple[int, int]:
+    checks = 0
+    violations = 0
+    for result in mission_results:
+        check_count = int(_number(result.get("queue_order_check_count"), 0.0))
+        if check_count:
+            checks += check_count
+            violations += int(_number(result.get("queue_order_violation_count"), 0.0))
+        elif "queue_order_preserved" in result:
+            checks += 1
+            violations += int(result.get("queue_order_preserved") is False)
+        elif "queue_order_respected" in result:
+            checks += 1
+            violations += int(result.get("queue_order_respected") is False)
+    return checks, violations
+
+
+def _metric_check_counts(
+    mission_results: list[JsonDict],
+    *,
+    check_count_key: str,
+    violation_count_key: str,
+    fallback_success_key: str,
+) -> tuple[int, int]:
+    checks = 0
+    violations = 0
+    for result in mission_results:
+        check_count = int(_number(result.get(check_count_key), 0.0))
+        if check_count:
+            checks += check_count
+            violations += int(_number(result.get(violation_count_key), 0.0))
+        elif fallback_success_key in result:
+            checks += 1
+            violations += int(result.get(fallback_success_key) is False)
+    return checks, violations
+
+
+def _weighted_mission_score(
+    missions: list[JsonDict],
+    mission_results: list[JsonDict],
+) -> float | None:
+    weighted_total = 0.0
+    weight_sum = 0.0
+    for result in mission_results:
+        mission = _mission_by_id(missions, str(result.get("mission_id", "")))
+        score = _mission_quality_score(result)
+        if score is None:
+            continue
+        weight = max(1.0, _number(mission.get("priority"), 1.0))
+        weighted_total += weight * score
+        weight_sum += weight
+    return weighted_total / weight_sum if weight_sum else None
+
+
+def _mission_quality_score(result: JsonDict) -> float | None:
+    values: list[bool] = []
+    for key in (
+        "success",
+        "deadline_success",
+        "goal_reached",
+        "correct_human_reached",
+        "resolved_target_reached",
+        "all_active_robot_goal_regions_reached",
+        "stream_terminal_goals_reached",
+        "social_law_success",
+        "personal_space_respected",
+        "pedestrian_yield_respected",
+        "group_integrity_respected",
+        "queue_order_respected",
+        "queue_order_preserved",
+    ):
+        value = result.get(key)
+        if isinstance(value, bool):
+            values.append(value)
+    if "collision_count" in result:
+        values.append(int(_number(result.get("collision_count"), 0.0)) == 0)
+    if "wrong_human_contact_count" in result:
+        values.append(int(_number(result.get("wrong_human_contact_count"), 0.0)) == 0)
+    if "robot_robot_collision_count" in result:
+        values.append(int(_number(result.get("robot_robot_collision_count"), 0.0)) == 0)
+    return _rate(values)
+
+
+def _handoff_success_rate(missions: list[JsonDict], events: list[JsonDict]) -> float | None:
+    mission_results = [
+        mission
+        for mission in missions
+        if "handoff" in str(mission.get("mission_type", "")).lower()
+        or "handoff" in str(mission.get("mission_id", "")).lower()
+    ]
+    event_attempts = [
+        event for event in events if "handoff" in str(event.get("event_type", "")).lower()
+    ]
+    denominator = len(mission_results) + len(event_attempts)
+    if not denominator:
+        return None
+    successes = 0
+    for mission in mission_results:
+        if str(mission.get("status", "")).lower() in {"success", "completed", "passed"}:
+            successes += 1
+    for event in event_attempts:
+        payload = _dict_value(event.get("payload"))
+        event_type = str(event.get("event_type", "")).lower()
+        if (
+            "success" in event_type
+            or "complete" in event_type
+            or payload.get("success") is True
+            or str(payload.get("status", "")).lower() in {"success", "completed", "passed"}
+        ):
+            successes += 1
+    return successes / denominator
+
+
+def _cancellation_compliance_rate(events: list[JsonDict]) -> float | None:
+    attempts = [
+        event for event in events if "cancel" in str(event.get("event_type", "")).lower()
+    ]
+    if not attempts:
+        return None
+    successes = 0
+    for event in attempts:
+        payload = _dict_value(event.get("payload"))
+        event_type = str(event.get("event_type", "")).lower()
+        if (
+            "compliance" in event_type
+            or "compliant" in event_type
+            or payload.get("compliant") is True
+            or payload.get("success") is True
+        ):
+            successes += 1
+    return successes / len(attempts)
+
+
+def _publication_variants(
+    payload: JsonDict,
+    missions: list[JsonDict],
+    humans: list[JsonDict],
+) -> list[str]:
+    variants = ["human_present" if humans else "human_free"]
+    active_law_count = sum(len(_active_social_law_ids(mission)) for mission in missions)
+    if active_law_count:
+        variants.append("social_law")
+    if any(
+        mission.get("mission_type") == "mission_stream" or _is_mission_stream_child(mission)
+        for mission in missions
+    ):
+        variants.append("full_mission_stream")
+    mission_types = {
+        str(mission.get("mission_type", ""))
+        for mission in missions
+        if mission.get("mission_type")
+    }
+    if len(mission_types) == 1:
+        variants.append(f"family:{next(iter(mission_types))}")
+    review_group = _dict_value(payload.get("metadata")).get("mission_review_group")
+    if review_group:
+        variants.append(f"family:{review_group}")
+    return sorted(set(variants))
 
 
 def _assigned_robot_id(mission: JsonDict, events: list[JsonDict]) -> str:
@@ -2096,6 +2475,7 @@ def _dense_robot_goal_checks(
             start_time=release_time,
             end_time=deadline,
         )
+        terminal_goal_distance = _terminal_goal_distance(robot, goal_xy)
         checks.append(
             {
                 "robot_id": robot_id,
@@ -2103,6 +2483,7 @@ def _dense_robot_goal_checks(
                 "goal_threshold_m": goal_threshold_m,
                 "goal_reach_time_s": goal_reach_time,
                 "minimum_goal_distance_m": min_goal_distance,
+                "terminal_goal_distance_m": terminal_goal_distance,
                 "goal_reached": min_goal_distance is not None
                 and min_goal_distance <= goal_threshold_m + 1e-6,
             }
@@ -2736,6 +3117,18 @@ def _actor_path_distance(actor: JsonDict) -> float:
     return distance
 
 
+def _robots_path_distance(robots: list[JsonDict], robot_ids: list[str]) -> float | None:
+    selected_ids = {robot_id for robot_id in robot_ids if robot_id}
+    selected = [
+        robot
+        for robot in robots
+        if not selected_ids or str(robot.get("robot_id", "")) in selected_ids
+    ]
+    if not selected:
+        return None
+    return sum(_actor_path_distance(robot) for robot in selected)
+
+
 def _actor_xy_at_time(actor: JsonDict, t: float) -> tuple[float, float] | None:
     points = _trajectory_points(actor)
     if not points:
@@ -2754,6 +3147,32 @@ def _terminal_actor_xy(actor: JsonDict) -> tuple[float, float] | None:
     if points:
         return _pose_xy(points[-1].get("map_pose"))
     return _pose_xy(actor.get("start_map_pose"))
+
+
+def _terminal_actor_time(actor: JsonDict) -> float:
+    points = _trajectory_points(actor)
+    if points:
+        return _number(points[-1].get("t"), 0.0)
+    return 0.0
+
+
+def _terminal_goal_distance(
+    robot: JsonDict,
+    goal_xy: tuple[float, float],
+) -> float | None:
+    terminal_xy = _terminal_actor_xy(robot)
+    return _distance(terminal_xy, goal_xy) if terminal_xy is not None else None
+
+
+def _terminal_robot_to_human_distance(
+    robot: JsonDict,
+    human: JsonDict,
+) -> float | None:
+    robot_xy = _terminal_actor_xy(robot)
+    human_xy = _actor_xy_at_time(human, _terminal_actor_time(robot))
+    if robot_xy is None or human_xy is None:
+        return None
+    return _distance(robot_xy, human_xy)
 
 
 def _robot_stopped_in_interval(

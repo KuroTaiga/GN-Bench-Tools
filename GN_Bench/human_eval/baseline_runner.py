@@ -7,6 +7,7 @@ from typing import Any
 
 from GN_Bench_baselines.human_eval.policies import (
     GreedyNearestPolicy,
+    HumanAwareGreedyPolicy,
     NoHumanAwarenessPolicy,
     OracleHumanCentricPolicy,
     PriorityGreedyPolicy,
@@ -20,12 +21,24 @@ JsonDict = dict[str, Any]
 
 
 POLICY_CLASSES = {
+    "oracle_route_follower": OracleHumanCentricPolicy,
+    "shortest_path_no_human": NoHumanAwarenessPolicy,
+    "human_aware_greedy": HumanAwareGreedyPolicy,
+    "priority_deadline_greedy": PriorityGreedyPolicy,
+    "single_robot_serial": SingleRobotSerialPolicy,
+    # Backward-compatible names used by the initial GN0 bridge.
     "oracle_human_centric": OracleHumanCentricPolicy,
     "greedy_nearest": GreedyNearestPolicy,
     "priority_greedy": PriorityGreedyPolicy,
     "no_human_awareness": NoHumanAwarenessPolicy,
-    "single_robot_serial": SingleRobotSerialPolicy,
 }
+DEFAULT_POLICY_NAMES = (
+    "oracle_route_follower",
+    "shortest_path_no_human",
+    "human_aware_greedy",
+    "priority_deadline_greedy",
+    "single_robot_serial",
+)
 
 
 def run_policy_assignment_sweep(
@@ -105,7 +118,7 @@ def run_policies_on_episode(
     episode: HumanCentricEpisode,
     policy_names: list[str] | None = None,
 ) -> dict[str, JsonDict]:
-    names = policy_names or list(POLICY_CLASSES)
+    names = policy_names or list(DEFAULT_POLICY_NAMES)
     return {
         policy_name: run_policy_assignment_sweep(policy_name, episode)
         for policy_name in names

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ class HumanCentricEpisode(Episode):
     navdp_root: str = attr.ib(default="")
     raw_scene_id: str = attr.ib(default="")
     dataset: str = attr.ib(default="")
+    split: str = attr.ib(default="")
     schema_version: str = attr.ib(default="")
     mission_type: str = attr.ib(default="")
     scene_assets: JsonDict = attr.ib(factory=dict)
@@ -40,6 +42,7 @@ class NavDPScenarioAdapter:
         scenario_path: str | Path,
         *,
         base_dir: str | Path | None = None,
+        split: str | None = None,
     ) -> HumanCentricEpisode:
         """Load one NavDP scenario JSON as a GN-Bench evaluation episode."""
 
@@ -75,6 +78,7 @@ class NavDPScenarioAdapter:
             navdp_root=str(root) if root else "",
             raw_scene_id=raw_scene_id,
             dataset=dataset,
+            split=str(split or payload.get("split") or ""),
             schema_version=str(payload.get("schema_version", "")),
             mission_type=self._mission_type(payload),
             scene_assets=scene_assets,
@@ -87,18 +91,51 @@ class NavDPScenarioAdapter:
         Supported producer shapes include:
         - {"examples": [{"path": "..."}]}
         - {"scenarios": [{"path": "..."}]}
+        - {"splits": {"val_seen": [{"path": "..."}], ...}}
         - [{"path": "..."}]
         """
 
         manifest_path = self.resolve_path(split_manifest_path)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         episodes: list[HumanCentricEpisode] = []
-        for entry in self._scenario_entries(manifest):
-            scenario_path = self._entry_path(entry)
-            if scenario_path is None:
-                continue
-            episodes.append(self.load_episode(scenario_path, base_dir=manifest_path.parent))
+        for split_name, entries in self._scenario_entries_by_split(manifest).items():
+            for entry in entries:
+                scenario_path = self._entry_path(entry)
+                if scenario_path is None:
+                    continue
+                episodes.append(
+                    self.load_episode(
+                        scenario_path,
+                        base_dir=manifest_path.parent,
+                        split=split_name,
+                    )
+                )
         return episodes
+
+    def load_split_by_name(
+        self,
+        split_manifest_path: str | Path,
+    ) -> dict[str, list[HumanCentricEpisode]]:
+        """Load a split manifest while preserving split labels."""
+
+        manifest_path = self.resolve_path(split_manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        episodes_by_split: dict[str, list[HumanCentricEpisode]] = {}
+        for split_name, entries in self._scenario_entries_by_split(manifest).items():
+            episodes: list[HumanCentricEpisode] = []
+            for entry in entries:
+                scenario_path = self._entry_path(entry)
+                if scenario_path is None:
+                    continue
+                episodes.append(
+                    self.load_episode(
+                        scenario_path,
+                        base_dir=manifest_path.parent,
+                        split=split_name,
+                    )
+                )
+            episodes_by_split[split_name] = episodes
+        return episodes_by_split
 
     def load_path(self, source_path: str | Path) -> list[HumanCentricEpisode]:
         """Load a scenario, manifest, or directory of scenario JSON files."""
@@ -202,12 +239,43 @@ class NavDPScenarioAdapter:
 
     @staticmethod
     def _scenario_entries(manifest: Any) -> list[Any]:
+        entries: list[Any] = []
+        for split_entries in NavDPScenarioAdapter._scenario_entries_by_split(manifest).values():
+            entries.extend(split_entries)
+        return entries
+
+    @staticmethod
+    def _scenario_entries_by_split(manifest: Any) -> dict[str, list[Any]]:
         if isinstance(manifest, list):
-            return manifest
+            return {"unsplit": manifest}
         if not isinstance(manifest, dict):
+            return {}
+        splits = manifest.get("splits")
+        if isinstance(splits, dict):
+            return {
+                str(split_name): entries
+                for split_name, split_payload in splits.items()
+                if (entries := NavDPScenarioAdapter._entry_list(split_payload))
+            }
+
+        entries = NavDPScenarioAdapter._entry_list(manifest)
+        grouped: defaultdict[str, list[Any]] = defaultdict(list)
+        default_split = str(manifest.get("split") or manifest.get("name") or "unsplit")
+        for entry in entries:
+            split_name = default_split
+            if isinstance(entry, dict) and entry.get("split"):
+                split_name = str(entry["split"])
+            grouped[split_name].append(entry)
+        return dict(grouped)
+
+    @staticmethod
+    def _entry_list(payload: Any) -> list[Any]:
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
             return []
         for key in ("examples", "scenarios", "episodes", "paths"):
-            value = manifest.get(key)
+            value = payload.get(key)
             if isinstance(value, list):
                 return value
         return []
